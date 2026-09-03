@@ -81,9 +81,9 @@ static void test_standard_24(void) {
 }
 
 static void test_rejects_oversized_frame(void) {
-    uint8_t img[1] = {0};
+    uint8_t img[1]      = {0};
     uint8_t payload[32] = {0};
-    size_t  out_len = 0;
+    size_t  out_len     = 0;
 
     TEST_ASSERT_FALSE(qr_decode(img, 513, 1, payload, sizeof(payload), &out_len));
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
@@ -93,6 +93,50 @@ static void test_rejects_oversized_frame(void) {
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
 }
 
+static void test_rejects_empty_payload(void) {
+    // Version-1 QR (21x21 modules, ECC L) encoding an empty byte payload
+    static const char* const modules = "111111101101001111111"
+                                       "100000100001101000001"
+                                       "101110100101001011101"
+                                       "101110101100101011101"
+                                       "101110100011001011101"
+                                       "100000100111101000001"
+                                       "111111101010101111111"
+                                       "000000000101000000000"
+                                       "001011101011010001001"
+                                       "110101010010011000110"
+                                       "110110101111110010001"
+                                       "000000010101111000110"
+                                       "000000101000011010101"
+                                       "000000001101001101010"
+                                       "111111100011100101101"
+                                       "100000101000000111010"
+                                       "101110101110110101101"
+                                       "101110100011011000110"
+                                       "101110101010100010001"
+                                       "100000100001110000110"
+                                       "111111100100100010111";
+
+    qr_grid_t g = {0};
+    g.size      = 21;
+    g.cells     = (uint8_t*)malloc(21u * 21u);
+    TEST_ASSERT_NOT_NULL(g.cells);
+    for (uint32_t i = 0; i < 21u * 21u; i++) {
+        g.cells[i] = (modules[i] == '1') ? 1u : 0u;
+    }
+
+    uint32_t w = 0, h = 0;
+    uint8_t* img = grid_to_gray(&g, 4, 4, &w, &h);
+
+    uint8_t payload[256] = {0};
+    size_t  out_len      = 0;
+    TEST_ASSERT_FALSE(qr_decode(img, w, h, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
+
+    free(img);
+    free(g.cells);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_compact_12);
@@ -100,5 +144,6 @@ int main(void) {
     RUN_TEST(test_standard_12);
     RUN_TEST(test_standard_24);
     RUN_TEST(test_rejects_oversized_frame);
+    RUN_TEST(test_rejects_empty_payload);
     return UNITY_END();
 }

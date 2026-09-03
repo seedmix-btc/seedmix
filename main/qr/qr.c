@@ -82,7 +82,7 @@ bool qr_decode(const uint8_t* gray, uint32_t w, uint32_t h, uint8_t* payload, si
         struct quirc_code code;
         struct quirc_data data;
         quirc_extract(q, i, &code);
-        if (quirc_decode(&code, &data) == QUIRC_SUCCESS &&
+        if (quirc_decode(&code, &data) == QUIRC_SUCCESS && (size_t)data.payload_len > 0 &&
             (size_t)data.payload_len <= payload_cap) {
             memcpy(payload, data.payload, data.payload_len);
             *out_len = data.payload_len;
