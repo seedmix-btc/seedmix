@@ -207,6 +207,12 @@ static void camera_frame_to_rgb565(const hal_camera_frame_t* f, uint8_t* rgb) {
 
     uint16_t* dst    = (uint16_t*)rgb;
     uint32_t  stride = f->bytes_per_line ? f->bytes_per_line : f->width * bpp;
+    if (stride < f->width * bpp) {
+        FATAL("camera frame stride is smaller than the image width");
+    }
+    if ((size_t)f->height > 0 && (size_t)stride > f->size / (size_t)f->height) {
+        FATAL("camera frame stride exceeds the supplied payload size");
+    }
 
     switch (f->pixfmt) {
     case HAL_CAMERA_FMT_RGB565:
