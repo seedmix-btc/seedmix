@@ -186,20 +186,23 @@ static void camera_frame_to_rgb565(const hal_camera_frame_t* f, uint8_t* rgb) {
     ASSERT_OR_DIE(f && f->data && f->width > 0 && f->height > 0, "invalid camera frame");
     ASSERT_OR_DIE(rgb, "null camera preview buffer");
 
-    uint32_t bpp;
+    uint32_t bpp; // bytes per pixel
     switch (f->pixfmt) {
     case HAL_CAMERA_FMT_GRAY8:
         bpp = 1;
         break;
     case HAL_CAMERA_FMT_YUYV:
-        bpp = 2;
-        break;
     case HAL_CAMERA_FMT_RGB565:
         bpp = 2;
         break;
     default:
         bpp = 0;
         break;
+    }
+
+    ASSERT_OR_DIE(bpp != 0, "Unsupported camera pixel format.");
+    if (f->size < (size_t)f->width * (size_t)f->height * bpp) {
+        FATAL("camera frame too small for declared dimensions");
     }
 
     uint16_t* dst    = (uint16_t*)rgb;
