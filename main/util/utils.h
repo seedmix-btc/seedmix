@@ -36,6 +36,14 @@ void secure_memzero(void* ptr, size_t len);
 void bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size);
 
 /**
+ * @brief Parse a hex string into bytes.
+ * @param hex       Input hex string (must have even length).
+ * @param out       Output buffer (must have size exactly strlen(hex) / 2).
+ * @param out_size  Size of `out` in bytes.
+ */
+void hex_to_bytes(const char* hex, char* out, size_t out_size);
+
+/**
  * @brief Deterministically expand @p data into @p out_len bytes using
  *        SHA-256 in counter mode (works for any output length).
  *

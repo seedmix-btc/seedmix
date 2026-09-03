@@ -37,6 +37,21 @@ void bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size) {
     out[len * 2] = '\0';
 }
 
+void hex_to_bytes(const char* hex, char* out, size_t out_size) {
+    ASSERT_OR_DIE(hex, "null hex input");
+    ASSERT_OR_DIE(out, "null output buffer");
+    size_t hex_len = strlen(hex);
+    ASSERT_OR_DIE(hex_len % 2 == 0, "hex string must have even length");
+    ASSERT_OR_DIE(out_size == hex_len / 2, "output buffer size incorrect");
+
+    for (size_t i = 0; i < hex_len / 2; i++) {
+        unsigned int byte;
+        int          res = sscanf(hex + i * 2, "%2x", &byte);
+        ASSERT_OR_DIE(res == 1, "hex parsing failed");
+        out[i] = (char)byte;
+    }
+}
+
 void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t out_len) {
     ASSERT_OR_DIE(data && data_len > 0, "sha256_expand: invalid input");
     ASSERT_OR_DIE(out && out_len > 0, "sha256_expand: invalid output");
