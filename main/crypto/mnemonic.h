@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define MNEMONIC_MAX_INPUT_LEN 512u
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -159,6 +159,11 @@ mnemonic_t* mnemonic_combine(mnemonic_t* a, mnemonic_t* b) {
 mnemonic_t* mnemonic_from_string(const char* words) {
     if (!words || !*words) return NULL;
 
+    if (strlen(words) >= MNEMONIC_MAX_INPUT_LEN) {
+        LOG_ERROR("Mnemonic too long");
+        return NULL;
+    }
+
     // Validate via libwally
     size_t  written = 0;
     uint8_t entropy[MAX_ENTROPY_BYTES];

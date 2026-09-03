@@ -611,9 +611,13 @@ static void on_touch_screen(void) {
 
 static void on_we_complete(void) {
     const char* txt = ui_word_entry_result(we_handle);
-    char        buf[512];
-    strncpy(buf, txt, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+    char        buf[MNEMONIC_MAX_INPUT_LEN];
+    size_t      txt_len = txt ? strlen(txt) : 0;
+    if (txt_len >= sizeof(buf)) {
+        FATAL("mnemonic input too long");
+    }
+    memcpy(buf, txt, txt_len);
+    buf[txt_len] = '\0';
     ui_word_entry_discard(we_handle);
     we_handle = NULL;
 

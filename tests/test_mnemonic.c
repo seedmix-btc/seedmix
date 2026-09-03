@@ -7,6 +7,7 @@
 #include "unity.h"
 
 #include <stdint.h>
+#include <string.h>
 #include <wally_bip39.h>
 
 void setUp(void) {}
@@ -123,6 +124,13 @@ static void test_from_string_invalid_word(void) {
     TEST_ASSERT_NULL(mnemonic_from_string("zzzzzz this is not a real mnemonic"));
 }
 
+static void test_from_string_too_long(void) {
+    char words[MNEMONIC_MAX_INPUT_LEN + 1];
+    memset(words, 'a', sizeof(words) - 1);
+    words[sizeof(words) - 1] = '\0';
+    TEST_ASSERT_NULL(mnemonic_from_string(words));
+}
+
 static void test_from_string_invalid_checksum(void) {
     // 12 x "abandon" is not a checksum-valid mnemonic
     TEST_ASSERT_NULL(mnemonic_from_string("abandon abandon abandon abandon abandon abandon abandon "
@@ -169,6 +177,7 @@ int main(void) {
     RUN_TEST(test_combine_xor_24);
     RUN_TEST(test_from_string_roundtrip);
     RUN_TEST(test_from_string_invalid_word);
+    RUN_TEST(test_from_string_too_long);
     RUN_TEST(test_from_string_invalid_checksum);
     RUN_TEST(test_from_string_unsupported_word_count);
     RUN_TEST(test_from_string_24_words);
