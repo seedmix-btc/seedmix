@@ -12,6 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define QR_SIDE_MAX 512u
+#define QR_SIZE_MAX (QR_SIDE_MAX * QR_SIDE_MAX)
+
 bool qr_encode(const uint8_t* data, size_t len, qr_mode_t mode, qr_grid_t* out) {
     if (!data || len == 0 || len > INT_MAX || !out) return false;
 
@@ -58,7 +61,9 @@ void qr_grid_free(qr_grid_t* g) {
 
 bool qr_decode(const uint8_t* gray, uint32_t w, uint32_t h, uint8_t* payload, size_t payload_cap,
                size_t* out_len) {
-    if (!gray || !payload || !out_len || w == 0 || h == 0) return false;
+    if (!gray || !payload || !out_len || w == 0 || h == 0 || payload_cap == 0) return false;
+
+    if (w > QR_SIDE_MAX || h > QR_SIDE_MAX || (size_t)w * (size_t)h > QR_SIZE_MAX) return false;
 
     struct quirc* q = quirc_new();
     if (!q) return false;

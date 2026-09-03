@@ -80,11 +80,25 @@ static void test_standard_24(void) {
     roundtrip((const uint8_t*)digits, 96, QR_MODE_NUMERIC, 29);
 }
 
+static void test_rejects_oversized_frame(void) {
+    uint8_t img[1] = {0};
+    uint8_t payload[32] = {0};
+    size_t  out_len = 0;
+
+    TEST_ASSERT_FALSE(qr_decode(img, 513, 1, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
+    TEST_ASSERT_FALSE(qr_decode(img, 1, 513, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
+    TEST_ASSERT_FALSE(qr_decode(img, 513, 513, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_compact_12);
     RUN_TEST(test_compact_24);
     RUN_TEST(test_standard_12);
     RUN_TEST(test_standard_24);
+    RUN_TEST(test_rejects_oversized_frame);
     return UNITY_END();
 }
