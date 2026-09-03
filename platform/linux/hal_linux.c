@@ -230,8 +230,21 @@ bool hal_camera_grab(hal_camera_t* cam, hal_camera_frame_t* out) {
     vb.memory = V4L2_MEMORY_MMAP;
     if (xioctl(cam->fd, VIDIOC_DQBUF, &vb) == -1) return false;
 
-    size_t   frame_len = vb.bytesused;
-    uint8_t* frame     = malloc(frame_len ? frame_len : 1);
+    if (vb.index >= cam->n_mapped) {
+        LOG_ERROR("camera returned invalid buffer index %u", vb.index);
+        xioctl(cam->fd, VIDIOC_QBUF, &vb);
+        return false;
+    }
+
+    size_t frame_len = vb.bytesused;
+    if (frame_len > cam->bufs[vb.index].length) {
+        LOG_ERROR("camera frame length %zu exceeds mapped buffer size %zu", frame_len,
+                  cam->bufs[vb.index].length);
+        xioctl(cam->fd, VIDIOC_QBUF, &vb);
+        return false;
+    }
+
+    uint8_t* frame = malloc(frame_len ? frame_len : 1);
     if (!frame) {
         xioctl(cam->fd, VIDIOC_QBUF, &vb);
         return false;
