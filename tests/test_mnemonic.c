@@ -166,6 +166,11 @@ static void test_null_safety(void) {
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)mnemonic_entropy_size(NULL));
 }
 
+static void test_from_string_empty_null(void) {
+    TEST_ASSERT_NULL(mnemonic_from_string(NULL));
+    TEST_ASSERT_NULL(mnemonic_from_string(""));
+}
+
 int main(void) {
     UNITY_BEGIN();
     mnemonic_init();
@@ -182,5 +187,6 @@ int main(void) {
     RUN_TEST(test_from_string_unsupported_word_count);
     RUN_TEST(test_from_string_24_words);
     RUN_TEST(test_null_safety);
+    RUN_TEST(test_from_string_empty_null);
     return UNITY_END();
 }

@@ -7,6 +7,7 @@
 #include "unity.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -60,6 +61,29 @@ static void test_lookup_caps_at_max_matches(void) {
     TEST_ASSERT_EQUAL_PTR(sentinel, matches[BIP39_MAX_MATCHES]);
 }
 
+static void test_word_at_index(void) {
+    TEST_ASSERT_EQUAL_STRING("abandon", bip39_wordlist_word(0));
+    TEST_ASSERT_EQUAL_STRING("zoo", bip39_wordlist_word(BIP39_WORD_COUNT - 1));
+    TEST_ASSERT_NULL(bip39_wordlist_word(BIP39_WORD_COUNT));
+}
+
+static void test_index_of_word(void) {
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)bip39_wordlist_index("abandon"));
+    TEST_ASSERT_EQUAL_UINT(BIP39_WORD_COUNT - 1, (unsigned)bip39_wordlist_index("zoo"));
+    TEST_ASSERT_TRUE(bip39_wordlist_index("notaword") == SIZE_MAX);
+    TEST_ASSERT_TRUE(bip39_wordlist_index("") == SIZE_MAX);
+    TEST_ASSERT_TRUE(bip39_wordlist_index(NULL) == SIZE_MAX);
+}
+
+static void test_word_index_roundtrip(void) {
+    static const char* const words[] = {"abandon", "ability", "zoo", "legal", "about"};
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+        size_t idx = bip39_wordlist_index(words[i]);
+        TEST_ASSERT_TRUE(idx != SIZE_MAX);
+        TEST_ASSERT_EQUAL_STRING(words[i], bip39_wordlist_word(idx));
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     bip39_wordlist_init();
@@ -68,5 +92,8 @@ int main(void) {
     RUN_TEST(test_lookup_empty_prefix);
     RUN_TEST(test_lookup_exact_word);
     RUN_TEST(test_lookup_caps_at_max_matches);
+    RUN_TEST(test_word_at_index);
+    RUN_TEST(test_index_of_word);
+    RUN_TEST(test_word_index_roundtrip);
     return UNITY_END();
 }
