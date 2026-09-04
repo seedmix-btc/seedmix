@@ -137,6 +137,52 @@ static void test_rejects_empty_payload(void) {
     free(g.cells);
 }
 
+static void test_encode_guards(void) {
+    const uint8_t data[16] = {0};
+    qr_grid_t     g        = {0};
+    // NULL input buffer
+    TEST_ASSERT_FALSE(qr_encode(NULL, sizeof(data), QR_MODE_BYTE, &g));
+    // Zero-length input
+    TEST_ASSERT_FALSE(qr_encode(data, 0, QR_MODE_BYTE, &g));
+    // NULL output grid
+    TEST_ASSERT_FALSE(qr_encode(data, sizeof(data), QR_MODE_BYTE, NULL));
+}
+
+static void test_decode_guards(void) {
+    uint8_t img[4]      = {0};
+    uint8_t payload[16] = {0};
+    size_t  out_len     = 0;
+    // NULL input image
+    TEST_ASSERT_FALSE(qr_decode(NULL, 1, 1, payload, sizeof(payload), &out_len));
+    // NULL output buffer
+    TEST_ASSERT_FALSE(qr_decode(img, 1, 1, NULL, sizeof(payload), &out_len));
+    // NULL output length pointer
+    TEST_ASSERT_FALSE(qr_decode(img, 1, 1, payload, sizeof(payload), NULL));
+    // Zero width/height
+    TEST_ASSERT_FALSE(qr_decode(img, 0, 1, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_FALSE(qr_decode(img, 1, 0, payload, sizeof(payload), &out_len));
+    // Zero output buffer length
+    TEST_ASSERT_FALSE(qr_decode(img, 1, 1, payload, 0, &out_len));
+}
+
+static void test_decode_rejects_small_capacity(void) {
+    const uint8_t data[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+    qr_grid_t     g        = {0};
+    TEST_ASSERT_TRUE(qr_encode(data, sizeof(data), QR_MODE_BYTE, &g));
+
+    uint32_t w = 0, h = 0;
+    uint8_t* img = grid_to_gray(&g, 4, 4, &w, &h);
+
+    uint8_t payload[4] = {0};
+    size_t  out_len    = 0;
+    // Payload buffer too small
+    TEST_ASSERT_FALSE(qr_decode(img, w, h, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
+
+    free(img);
+    qr_grid_free(&g);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_compact_12);
@@ -145,5 +191,8 @@ int main(void) {
     RUN_TEST(test_standard_24);
     RUN_TEST(test_rejects_oversized_frame);
     RUN_TEST(test_rejects_empty_payload);
+    RUN_TEST(test_encode_guards);
+    RUN_TEST(test_decode_guards);
+    RUN_TEST(test_decode_rejects_small_capacity);
     return UNITY_END();
 }

@@ -191,6 +191,22 @@ static void test_standard_decode_rejects_bad_checksum(void) {
     TEST_ASSERT_NULL(seedqr_standard_decode(s));
 }
 
+static void test_standard_encode_error_paths(void) {
+    const uint8_t e[16] = {0};
+    mnemonic_t*   m     = mnemonic_from_entropy(e, sizeof(e));
+    TEST_ASSERT_NOT_NULL(m);
+
+    char out[SEEDQR_STANDARD_12_DIGITS + 1];
+    // NULL input mnemonic
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)seedqr_standard_encode(NULL, out, sizeof(out)));
+    // NULL output buffer
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)seedqr_standard_encode(m, NULL, sizeof(out)));
+    // Output buffer too small
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)seedqr_standard_encode(m, out, SEEDQR_STANDARD_12_DIGITS));
+
+    mnemonic_discard(m);
+}
+
 int main(void) {
     UNITY_BEGIN();
     mnemonic_init();
@@ -206,5 +222,6 @@ int main(void) {
     RUN_TEST(test_standard_decode_rejects_non_digit);
     RUN_TEST(test_standard_decode_rejects_bad_index);
     RUN_TEST(test_standard_decode_rejects_bad_checksum);
+    RUN_TEST(test_standard_encode_error_paths);
     return UNITY_END();
 }
