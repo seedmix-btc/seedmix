@@ -59,6 +59,17 @@ mnemonic_t* mnemonic_combine(mnemonic_t* a, mnemonic_t* b);
 /** Parse a space-separated mnemonic string (returns NULL on failure). */
 mnemonic_t* mnemonic_from_string(const char* words);
 
+/**
+ * @brief Enumerate the valid BIP39 last words for a mnemonic prefix.
+ *
+ * Given a mnemonic whose first N-1 words are valid, fill @p out with every
+ * last word that yields a checksum-valid mnemonic (2^7 = 128 for 12 words,
+ * 2^3 = 8 for 24 words).  Pointers refer into the BIP39 word list.  Returns
+ * the number of candidates written (<= @p out_cap), or 0 when the prefix
+ * cannot be parsed (wrong word count or a word not in the BIP39 list).
+ */
+size_t mnemonic_last_word_candidates(const char* words, const char** out, size_t out_cap);
+
 /** Discard (zero + free). */
 void mnemonic_discard(mnemonic_t* m);
 

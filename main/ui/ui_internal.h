@@ -61,6 +61,13 @@ lv_obj_t* ui_add_scroll_arrows(lv_obj_t* parent, lv_obj_t* target, lv_coord_t st
  */
 void ui_nav_build(lv_obj_t* scr);
 
+/**
+ * Add a focusable widget to the shared navigation group without rebuilding
+ * the whole screen.  No-op when no navigation input
+ * device has been attached.
+ */
+void ui_nav_add_obj(lv_obj_t* obj);
+
 /** Create a button with a plain void(void) callback. */
 lv_obj_t* ui_add_btn(lv_obj_t* parent, const char* text, ui_cb_t cb, ui_btn_size_t size,
                      lv_align_t align, lv_coord_t x_ofs, lv_coord_t y_ofs);

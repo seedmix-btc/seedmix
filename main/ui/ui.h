@@ -15,6 +15,7 @@ extern "C" {
 typedef void (*ui_cb_t)(void);
 typedef void (*ui_tap_cb_t)(lv_coord_t x, lv_coord_t y);
 typedef void (*ui_uint_cb_t)(uint8_t value);
+typedef void (*ui_word_cb_t)(const char* word);
 
 #define UI_COLOR_SEED_GREEN 0xA6CF5E // light green
 #define UI_COLOR_MIX_GREEN 0x305C2B  // dark green
@@ -54,6 +55,9 @@ void ui_show_merge_process(const char* current_words, const char* current_entrop
                            const char* new_entropy_hex, const char* merged_entropy_hex,
                            const char* merged_words, ui_cb_t on_ok);
 void ui_show_msg(const char* msg);
+void ui_show_mnemonic_error(ui_cb_t on_cancel, ui_cb_t on_retry, ui_cb_t on_choose);
+void ui_show_word_picker(const char* title, const char* const* words, size_t count,
+                         ui_word_cb_t on_select, ui_cb_t on_back);
 void ui_delay_ms(uint32_t ms);
 void ui_go_main(void);
 

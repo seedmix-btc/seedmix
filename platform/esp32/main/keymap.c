@@ -7,8 +7,8 @@
  * staggered two-button press still registers as ENTER, and maps combinations
  * to logical LVGL navigation keys:
  *
- *   button 0 alone       -> LV_KEY_PREV  (previous focusable item)
- *   button 1 alone       -> LV_KEY_NEXT  (next focusable item)
+ *   button 0 alone       -> LV_KEY_LEFT  (previous focusable item)
+ *   button 1 alone       -> LV_KEY_RIGHT (next focusable item)
  *   button 0 + button 1  -> LV_KEY_ENTER (confirm / activate)
  */
 
@@ -85,7 +85,7 @@ static lv_key_t translate(void) {
         }
         if (b0 || b1) {
             s_state     = KEYMAP_STATE_ARMING;
-            s_arm_key   = b0 ? LV_KEY_PREV : LV_KEY_NEXT;
+            s_arm_key   = b0 ? LV_KEY_LEFT : LV_KEY_RIGHT;
             s_arm_since = now;
         }
         return 0;
@@ -100,7 +100,7 @@ static lv_key_t translate(void) {
             return 0;
         }
         {
-            lv_key_t key = b0 ? LV_KEY_PREV : LV_KEY_NEXT;
+            lv_key_t key = b0 ? LV_KEY_LEFT : LV_KEY_RIGHT;
             if (key != s_arm_key) {
                 /* A different single button went down - re-arm. */
                 s_arm_key   = key;
@@ -123,11 +123,11 @@ static lv_key_t translate(void) {
             s_state = KEYMAP_STATE_IDLE;
             return 0;
         }
-        return (b0 ? LV_KEY_PREV : LV_KEY_NEXT);
+        return (b0 ? LV_KEY_LEFT : LV_KEY_RIGHT);
 
     case KEYMAP_STATE_ENTER:
         /* Latch ENTER until all buttons are released so an early release of
-         * one button cannot produce a stray PREV/NEXT afterwards. */
+         * one button cannot produce a stray LEFT/RIGHT afterwards. */
         if (!b0 && !b1) {
             s_state = KEYMAP_STATE_IDLE;
             return 0;
@@ -158,7 +158,7 @@ static void keymap_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 void keymap_init(void) {
 #if CONFIG_SEEDMIX_BUTTONS_ENABLE
     s_indev = lv_indev_create();
-    lv_indev_set_type(s_indev, LV_INDEV_TYPE_KEYPAD);
+    lv_indev_set_type(s_indev, LV_INDEV_TYPE_ENCODER);
     lv_indev_set_read_cb(s_indev, keymap_read_cb);
 #endif
 }

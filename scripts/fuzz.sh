@@ -53,6 +53,7 @@ run_fuzzer() {
 
 MNEMONIC_DEPS=(
     "${PROJECT_ROOT}/main/crypto/mnemonic.c"
+    "${PROJECT_ROOT}/main/crypto/bip39_wordlist.c"
     "${PROJECT_ROOT}/main/crypto/secure_stack.c"
     "${PROJECT_ROOT}/main/util/utils.c"
     "${PROJECT_ROOT}/main/util/log.c"

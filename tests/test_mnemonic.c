@@ -7,6 +7,8 @@
 #include "unity.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wally_bip39.h>
 
@@ -171,6 +173,75 @@ static void test_from_string_empty_null(void) {
     TEST_ASSERT_NULL(mnemonic_from_string(""));
 }
 
+static bool candidate_forms_valid_mnemonic(const char* prefix, const char* last) {
+    char full[MNEMONIC_MAX_INPUT_LEN];
+    int  r = snprintf(full, sizeof(full), "%s %s", prefix, last);
+    if (r <= 0 || (size_t)r >= sizeof(full)) return false;
+    mnemonic_t* m = mnemonic_from_string(full);
+    if (!m) return false;
+    mnemonic_discard(m);
+    return true;
+}
+
+static void test_last_word_candidates_12(void) {
+    const char* input = "abandon abandon abandon abandon abandon abandon abandon abandon abandon "
+                        "abandon abandon abandon";
+    const char* prefix =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+
+    const char* out[128];
+    size_t      n = mnemonic_last_word_candidates(input, out, 128);
+    TEST_ASSERT_EQUAL_UINT(128, (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_NOT_NULL(out[i]);
+        TEST_ASSERT(candidate_forms_valid_mnemonic(prefix, out[i]));
+    }
+}
+
+static void test_last_word_candidates_24(void) {
+    const char* input = "abandon abandon abandon abandon abandon abandon abandon abandon abandon "
+                        "abandon abandon abandon "
+                        "abandon abandon abandon abandon abandon abandon abandon abandon abandon "
+                        "abandon abandon abandon";
+    const char* prefix =
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon "
+        "abandon "
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+
+    const char* out[128];
+    size_t      n = mnemonic_last_word_candidates(input, out, 128);
+    TEST_ASSERT_EQUAL_UINT(8, (unsigned)n);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_NOT_NULL(out[i]);
+        TEST_ASSERT(candidate_forms_valid_mnemonic(prefix, out[i]));
+    }
+}
+
+static void test_last_word_candidates_invalid(void) {
+    const char* out[128];
+    // A non-word in the prefix cannot produce candidates.
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)mnemonic_last_word_candidates(
+                                  "zzzzzz abandon abandon abandon abandon abandon abandon abandon "
+                                  "abandon abandon abandon abandon",
+                                  out, 128));
+    // Unsupported word counts and empty input.
+    TEST_ASSERT_EQUAL_UINT(
+        0, (unsigned)mnemonic_last_word_candidates("abandon abandon abandon", out, 128));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)mnemonic_last_word_candidates("", out, 128));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)mnemonic_last_word_candidates(NULL, out, 128));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)mnemonic_last_word_candidates(
+                                  "abandon abandon abandon abandon abandon abandon abandon abandon "
+                                  "abandon abandon abandon abandon",
+                                  NULL, 0));
+    // More than 24 words must be rejected without overflowing the tokenizer.
+    TEST_ASSERT_EQUAL_UINT(
+        0, (unsigned)mnemonic_last_word_candidates(
+               "abandon abandon abandon abandon abandon abandon abandon abandon "
+               "abandon abandon abandon abandon abandon abandon abandon abandon "
+               "abandon abandon abandon abandon abandon abandon abandon abandon abandon",
+               out, 128));
+}
+
 int main(void) {
     UNITY_BEGIN();
     mnemonic_init();
@@ -188,5 +259,8 @@ int main(void) {
     RUN_TEST(test_from_string_24_words);
     RUN_TEST(test_null_safety);
     RUN_TEST(test_from_string_empty_null);
+    RUN_TEST(test_last_word_candidates_12);
+    RUN_TEST(test_last_word_candidates_24);
+    RUN_TEST(test_last_word_candidates_invalid);
     return UNITY_END();
 }
