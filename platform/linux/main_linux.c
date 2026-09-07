@@ -5,12 +5,18 @@
  */
 
 #include "app.h"
-#include "lv_sdl_keyboard.h"
 #include "lv_sdl_mouse.h"
 #include "lv_sdl_mousewheel.h"
 #include "lv_sdl_window.h"
 #include "lvgl.h"
+#include "ui.h"
 #include <SDL2/SDL.h>
+
+#ifdef ENABLE_BUTTONS
+#include "buttons_linux.h"
+#else
+#include "lv_sdl_keyboard.h"
+#endif
 
 /* -- Display configuration -------------------------------------------- */
 #define DISPLAY_WIDTH 480
@@ -35,7 +41,12 @@ int main(int argc, char** argv) {
 
     /* Register input devices */
     lv_sdl_mouse_create();
+#ifdef ENABLE_BUTTONS
+    buttons_linux_init();
+    ui_nav_set_indev(buttons_linux_get_indev());
+#else
     lv_sdl_keyboard_create();
+#endif
     lv_sdl_mousewheel_create();
 
     /* Run the application */

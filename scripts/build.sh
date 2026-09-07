@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # -- Build script for Linux prototype ---------------------------------------
 # Usage:
-#   ./scripts/build.sh          Debug build
-#   ./scripts/build.sh release  Release build
-#   ./scripts/build.sh clean    Clean build directory
+#   ./scripts/build.sh           Debug build (mouse/touch input)
+#   ./scripts/build.sh release   Release build
+#   ./scripts/build.sh asan      Debug build with AddressSanitizer
+#   ./scripts/build.sh buttons   Debug build with button input emulation
+#   ./scripts/build.sh clean     Clean build directory
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -42,10 +44,16 @@ fi
 # -- Configure & Build ------------------------------------------------
 BUILD_TYPE="${1:-Debug}"
 ASAN_FLAG=""
+BUTTONS_FLAG="-DENABLE_BUTTONS=OFF"
+
 if [ "$BUILD_TYPE" = "asan" ]; then
     BUILD_TYPE="Debug"
     ASAN_FLAG="-DENABLE_ASAN=ON"
     echo "AddressSanitizer enabled"
+elif [ "$BUILD_TYPE" = "buttons" ]; then
+    BUILD_TYPE="Debug"
+    BUTTONS_FLAG="-DENABLE_BUTTONS=ON"
+    echo "Button input emulation enabled"
 fi
 BUILD_TYPE="${BUILD_TYPE^}"
 
@@ -56,7 +64,8 @@ echo "Configuring (${BUILD_TYPE})…"
 cmake "$PROJECT_ROOT" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DLVGL_DIR="${PROJECT_ROOT}/external/lvgl" \
-    $ASAN_FLAG
+    $ASAN_FLAG \
+    $BUTTONS_FLAG
 
 echo "Building…"
 cmake --build . -- -j"$(nproc)"
