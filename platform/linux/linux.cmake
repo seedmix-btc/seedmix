@@ -81,3 +81,9 @@ if(ENABLE_BUTTONS)
     target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_BUTTONS)
     message(STATUS "Button input emulation enabled (LEFT/RIGHT/ENTER)")
 endif()
+
+# -- T-Display screen size ----------------------------------------------
+if(ENABLE_TDISPLAY)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_TDISPLAY)
+    message(STATUS "T-Display screen size enabled (240x135)")
+endif()

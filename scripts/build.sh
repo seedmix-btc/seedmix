@@ -5,6 +5,7 @@
 #   ./scripts/build.sh release   Release build
 #   ./scripts/build.sh asan      Debug build with AddressSanitizer
 #   ./scripts/build.sh buttons   Debug build with button input emulation
+#   ./scripts/build.sh tdisplay  Debug build at T-Display size (240x135) + buttons
 #   ./scripts/build.sh clean     Clean build directory
 set -euo pipefail
 
@@ -45,6 +46,7 @@ fi
 BUILD_TYPE="${1:-Debug}"
 ASAN_FLAG=""
 BUTTONS_FLAG="-DENABLE_BUTTONS=OFF"
+TDISPLAY_FLAG="-DENABLE_TDISPLAY=OFF"
 
 if [ "$BUILD_TYPE" = "asan" ]; then
     BUILD_TYPE="Debug"
@@ -54,6 +56,11 @@ elif [ "$BUILD_TYPE" = "buttons" ]; then
     BUILD_TYPE="Debug"
     BUTTONS_FLAG="-DENABLE_BUTTONS=ON"
     echo "Button input emulation enabled"
+elif [ "$BUILD_TYPE" = "tdisplay" ]; then
+    BUILD_TYPE="Debug"
+    TDISPLAY_FLAG="-DENABLE_TDISPLAY=ON"
+    BUTTONS_FLAG="-DENABLE_BUTTONS=ON"
+    echo "T-Display screen size enabled (240x135) with button input"
 fi
 BUILD_TYPE="${BUILD_TYPE^}"
 
@@ -65,7 +72,8 @@ cmake "$PROJECT_ROOT" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DLVGL_DIR="${PROJECT_ROOT}/external/lvgl" \
     $ASAN_FLAG \
-    $BUTTONS_FLAG
+    $BUTTONS_FLAG \
+    $TDISPLAY_FLAG
 
 echo "Building…"
 cmake --build . -- -j"$(nproc)"

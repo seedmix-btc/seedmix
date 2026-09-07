@@ -19,8 +19,13 @@
 #endif
 
 /* -- Display configuration -------------------------------------------- */
+#ifdef ENABLE_TDISPLAY
+#define DISPLAY_WIDTH 240
+#define DISPLAY_HEIGHT 135
+#else
 #define DISPLAY_WIDTH 480
 #define DISPLAY_HEIGHT 320
+#endif
 
 /* -- SDL tick callback ------------------------------------------------ */
 static uint32_t sdl_tick_cb(void) { return SDL_GetTicks(); }
