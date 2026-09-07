@@ -4,6 +4,7 @@
  */
 
 #include "mnemonic.h"
+#include "bip39_wordlist.h"
 #include "hal.h"
 #include "secure_stack.h"
 #include "util/error.h"
@@ -16,6 +17,7 @@
 
 #include <wally_bip39.h>
 #include <wally_core.h>
+#include <wally_crypto.h>
 
 #define MAX_ENTROPY_BYTES 32
 
@@ -190,6 +192,89 @@ mnemonic_t* mnemonic_from_string(const char* words) {
     }
     LOG_INFO("Mnemonic from string (%zu-byte entropy)", written);
     return m;
+}
+
+size_t mnemonic_last_word_candidates(const char* words, const char** out, size_t out_cap) {
+    if (!words || !*words || strlen(words) >= MNEMONIC_MAX_INPUT_LEN || !out) return 0;
+
+    // Tokenize the mnemonic (the final word is the one we'll replace)
+    char        toks[24][16];
+    size_t      n = 0;
+    const char* p = words;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        if (n >= 24) return 0; // too many words
+        size_t tlen = 0;
+        while (*p && *p != ' ' && tlen + 1 < sizeof(toks[n])) {
+            toks[n][tlen++] = *p++;
+        }
+        toks[n][tlen] = '\0';
+        while (*p && *p != ' ') p++; // skip any overlong token remainder
+
+        n++;
+    }
+    if (n != 12 && n != 24) return 0;
+
+    // Look up the first n-1 words (ignore the wrong last word)
+    size_t idxs[24];
+    for (size_t i = 0; i + 1 < n; i++) {
+        idxs[i] = bip39_wordlist_index(toks[i]);
+        if (idxs[i] == SIZE_MAX) return 0;
+    }
+
+    size_t entropy_len   = (n == 12) ? 16u : 32u;
+    size_t checksum_bits = entropy_len * 8u / 32u; // 4 or 8
+    size_t missing_bits  = 11u - checksum_bits;    // 7 or 3
+
+    // Rebuild the known entropy prefix from the first n-1 words
+    uint8_t base[MAX_ENTROPY_BYTES] = {0};
+    size_t  base_bit                = 0;
+    for (size_t i = 0; i + 1 < n; i++) {
+        for (int b = 10; b >= 0; b--) {
+            if (idxs[i] & (1u << b)) {
+                base[base_bit / 8] |= (uint8_t)(1u << (7 - (base_bit % 8)));
+            }
+            base_bit++;
+        }
+    }
+
+    // Every possible fill of the missing entropy bits yields one valid last
+    // word, enumerate them all
+    size_t combos = (size_t)1u << missing_bits;
+    size_t count  = 0;
+    for (size_t m = 0; m < combos && count < out_cap; m++) {
+        uint8_t e[MAX_ENTROPY_BYTES];
+        memcpy(e, base, sizeof(e));
+        size_t bit = base_bit;
+        for (size_t b = 0; b < missing_bits; b++) {
+            if (m & ((size_t)1u << (missing_bits - 1u - b))) {
+                e[bit / 8] |= (uint8_t)(1u << (7 - (bit % 8)));
+            }
+            bit++;
+        }
+
+        uint8_t hash[SHA256_LEN];
+        if (wally_sha256(e, entropy_len, hash, SHA256_LEN) != WALLY_OK) {
+            secure_memzero(e, sizeof(e));
+            secure_memzero(base, sizeof(base));
+            return 0;
+        }
+        uint8_t checksum = (uint8_t)(hash[0] >> (8u - checksum_bits));
+        secure_memzero(hash, sizeof(hash));
+        secure_memzero(e, sizeof(e));
+
+        size_t      last_idx = (m << checksum_bits) | (size_t)checksum;
+        const char* last     = bip39_wordlist_word(last_idx);
+        if (!last) {
+            secure_memzero(base, sizeof(base));
+            return 0;
+        }
+        out[count++] = last;
+    }
+
+    secure_memzero(base, sizeof(base));
+    return count;
 }
 
 void mnemonic_discard(mnemonic_t* m) {

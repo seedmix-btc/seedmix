@@ -132,11 +132,35 @@ static void delete_screen_cb(void* ptr) {
 }
 
 /* -- Button navigation ------------------------------------------------ */
+
+// High-visibility focus style applied to every object in the nav group
+static lv_style_t s_nav_focus_style;
+static bool       s_nav_focus_style_init = false;
+
+static void ui_nav_focus_style_ensure(void) {
+    if (s_nav_focus_style_init) return;
+    lv_style_init(&s_nav_focus_style);
+    lv_style_set_outline_color(&s_nav_focus_style, lv_color_white());
+    lv_style_set_outline_width(&s_nav_focus_style, ui_scale(3));
+    lv_style_set_outline_pad(&s_nav_focus_style, ui_scale(2));
+    lv_style_set_outline_opa(&s_nav_focus_style, LV_OPA_COVER);
+    s_nav_focus_style_init = true;
+}
+
+static void ui_nav_apply_focus_style(lv_obj_t* obj) {
+    ui_nav_focus_style_ensure();
+    lv_obj_add_style(obj, &s_nav_focus_style, LV_STATE_FOCUS_KEY);
+}
+
 static bool ui_nav_obj_is_focusable(const lv_obj_t* obj) {
     if (lv_obj_has_state(obj, LV_STATE_DISABLED)) return false;
 
     if (lv_obj_has_class(obj, &lv_button_class)) return true;
-    if (lv_obj_has_class(obj, &lv_textarea_class)) return true;
+    if (lv_obj_has_class(obj, &lv_textarea_class)) {
+        // Display-only textareas (e.g. the word-entry keyboard target) are
+        // excluded from keypad navigation by clearing CLICK_FOCUSABLE
+        return lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    }
     if (lv_obj_has_class(obj, &lv_buttonmatrix_class)) return true;
     if (lv_obj_has_class(obj, &lv_label_class) && lv_obj_has_flag(obj, LV_OBJ_FLAG_CLICKABLE)) {
         return true;
@@ -150,6 +174,7 @@ static void ui_nav_collect(lv_obj_t* obj) {
 
     if (ui_nav_obj_is_focusable(obj)) {
         lv_group_add_obj(s_nav_group, obj);
+        ui_nav_apply_focus_style(obj);
     }
 
     uint32_t n = lv_obj_get_child_count(obj);
@@ -172,7 +197,15 @@ void ui_nav_set_indev(lv_indev_t* indev) {
 void ui_nav_build(lv_obj_t* scr) {
     if (!s_nav_group || !scr) return;
     lv_group_remove_all_objs(s_nav_group);
+    lv_group_set_editing(s_nav_group, false);
     ui_nav_collect(scr);
+}
+
+void ui_nav_add_obj(lv_obj_t* obj) {
+    if (!s_nav_group || !obj) return;
+    if (!ui_nav_obj_is_focusable(obj)) return;
+    lv_group_add_obj(s_nav_group, obj);
+    ui_nav_apply_focus_style(obj);
 }
 
 void ui_swap_screen(lv_obj_t* new_scr) {
@@ -1047,6 +1080,176 @@ void ui_show_msg(const char* msg) {
     lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
     ui_swap_screen(s);
     lv_refr_now(NULL);
+}
+
+static lv_obj_t* mnemonic_error_btn(lv_obj_t* parent, const char* text, ui_cb_t cb,
+                                    lv_align_t align, lv_coord_t x_ofs, lv_coord_t y_ofs) {
+    lv_obj_t* b = lv_button_create(parent);
+    lv_obj_set_size(b, ui_scale(300), ui_scale(44));
+    lv_obj_align(b, align, ui_scale(x_ofs), ui_scale(y_ofs));
+    lv_obj_t* l = lv_label_create(b);
+    lv_label_set_text(l, text);
+    lv_obj_set_style_text_font(l, ui_font(16), 0);
+    lv_obj_center(l);
+    if (cb) {
+        union {
+            ui_cb_t fn;
+            void*   vp;
+        } u = {.fn = cb};
+        lv_obj_add_event_cb(b, ui_btn_invoke, LV_EVENT_CLICKED, u.vp);
+    }
+    return b;
+}
+
+void ui_show_mnemonic_error(ui_cb_t on_cancel, ui_cb_t on_retry, ui_cb_t on_choose) {
+    ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ASSERT_OR_DIE(on_retry, "null on_retry");
+    ASSERT_OR_DIE(on_choose, "null on_choose");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Invalid checksum word");
+
+    lv_obj_t* hint = lv_label_create(s);
+    lv_label_set_text(hint, "The last (checksum) word is invalid.");
+    lv_obj_set_style_text_color(hint, lv_color_white(), 0);
+    lv_obj_set_style_text_font(hint, ui_font(16), 0);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(hint, ui_scale(440));
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_align(hint, LV_ALIGN_CENTER, 0, ui_scale(-75));
+
+    mnemonic_error_btn(s, "Enter Last Word Again", on_retry, LV_ALIGN_CENTER, 0, -10);
+    mnemonic_error_btn(s, "Pick Last Word From List", on_choose, LV_ALIGN_CENTER, 0, 50);
+    mnemonic_error_btn(s, "Cancel", on_cancel, LV_ALIGN_CENTER, 0, 110);
+
+    ui_swap_screen(s);
+}
+
+/* -- Word picker (paginated grid) ------------------------------------ */
+static struct {
+    const char* const* words;
+    size_t             count;
+    size_t             page;
+    size_t             per_page;
+    size_t             page_count;
+    lv_obj_t*          grid;
+    lv_obj_t*          page_label;
+    lv_obj_t*          prev_btn;
+    lv_obj_t*          next_btn;
+    ui_word_cb_t       on_select;
+} word_picker;
+
+static void word_picker_btn_cb(lv_event_t* e) {
+    const char* word = (const char*)lv_event_get_user_data(e);
+    if (word_picker.on_select) word_picker.on_select(word);
+}
+
+static void word_picker_render_page(void) {
+    ASSERT_OR_DIE(word_picker.grid, "null word picker grid");
+    lv_obj_clean(word_picker.grid);
+
+    size_t start = word_picker.page * word_picker.per_page;
+    size_t end   = start + word_picker.per_page;
+    if (end > word_picker.count) end = word_picker.count;
+
+    for (size_t i = start; i < end; i++) {
+        lv_obj_t* b = lv_button_create(word_picker.grid);
+        lv_obj_set_size(b, ui_scale(90), ui_scale(40));
+        lv_obj_add_event_cb(b, word_picker_btn_cb, LV_EVENT_CLICKED, (void*)word_picker.words[i]);
+
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, word_picker.words[i]);
+        lv_obj_set_style_text_font(l, ui_font(14), 0);
+        lv_obj_center(l);
+    }
+
+    if (word_picker.page_label) {
+        char buf[32];
+        int  r = snprintf(buf, sizeof(buf), "%u / %u", (unsigned)word_picker.page + 1,
+                         (unsigned)word_picker.page_count);
+        ASSERT_OR_DIE(r > 0 && (size_t)r < sizeof(buf), "page label too long");
+        lv_label_set_text(word_picker.page_label, buf);
+    }
+
+    if (word_picker.prev_btn) {
+        if (word_picker.page == 0)
+            lv_obj_add_state(word_picker.prev_btn, LV_STATE_DISABLED);
+        else
+            lv_obj_clear_state(word_picker.prev_btn, LV_STATE_DISABLED);
+    }
+    if (word_picker.next_btn) {
+        if (word_picker.page + 1 >= word_picker.page_count)
+            lv_obj_add_state(word_picker.next_btn, LV_STATE_DISABLED);
+        else
+            lv_obj_clear_state(word_picker.next_btn, LV_STATE_DISABLED);
+    }
+}
+
+static void word_picker_prev_cb(void) {
+    if (word_picker.page == 0) return;
+    word_picker.page--;
+    word_picker_render_page();
+    ui_nav_build(lv_screen_active());
+}
+
+static void word_picker_next_cb(void) {
+    if (word_picker.page + 1 >= word_picker.page_count) return;
+    word_picker.page++;
+    word_picker_render_page();
+    ui_nav_build(lv_screen_active());
+}
+
+void ui_show_word_picker(const char* title, const char* const* words, size_t count,
+                         ui_word_cb_t on_select, ui_cb_t on_back) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(words, "null words");
+    ASSERT_OR_DIE(count > 0, "empty word list");
+    ASSERT_OR_DIE(on_select, "null on_select");
+    ASSERT_OR_DIE(on_back, "null on_back");
+
+    bool     small    = ui_small_screen();
+    unsigned cols     = small ? 3u : 4u;
+    unsigned rows     = small ? 3u : 4u;
+    size_t   per_page = cols * rows;
+
+    memset(&word_picker, 0, sizeof(word_picker));
+    word_picker.words      = words;
+    word_picker.count      = count;
+    word_picker.page       = 0;
+    word_picker.per_page   = per_page;
+    word_picker.page_count = (count + per_page - 1) / per_page;
+    word_picker.on_select  = on_select;
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    word_picker.grid = lv_obj_create(s);
+    lv_obj_set_size(word_picker.grid, ui_scale((lv_coord_t)((int)cols * 90 + ((int)cols - 1) * 6)),
+                    ui_scale((lv_coord_t)((int)rows * 40 + ((int)rows - 1) * 6)));
+    lv_obj_align(word_picker.grid, LV_ALIGN_TOP_MID, 0, ui_scale(48));
+    lv_obj_set_style_bg_color(word_picker.grid, lv_color_black(), 0);
+    lv_obj_set_style_border_width(word_picker.grid, 0, 0);
+    lv_obj_set_style_pad_all(word_picker.grid, 0, 0);
+    lv_obj_set_flex_flow(word_picker.grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(word_picker.grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(word_picker.grid, ui_scale(6), 0);
+    lv_obj_set_style_pad_column(word_picker.grid, ui_scale(6), 0);
+
+    word_picker.page_label = lv_label_create(s);
+    lv_obj_set_style_text_color(word_picker.page_label, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(word_picker.page_label, ui_font(18), 0);
+    lv_obj_align(word_picker.page_label, LV_ALIGN_TOP_MID, 0, ui_scale(240));
+
+    word_picker.prev_btn =
+        ui_add_btn(s, "Prev", word_picker_prev_cb, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    word_picker.next_btn = ui_add_btn(s, "Next", word_picker_next_cb, UI_BTN_SIZE_WIDE,
+                                      LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    ui_add_btn(s, "Back", on_back, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_RIGHT, -10, 5);
+
+    word_picker_render_page();
+
+    ui_swap_screen(s);
 }
 
 void ui_delay_ms(uint32_t ms) {

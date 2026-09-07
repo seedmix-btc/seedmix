@@ -2,8 +2,8 @@
  * @file keymap.h
  * @brief Translation layer: physical buttons -> logical LVGL keys.
  *
- *   button 0 alone       -> LV_KEY_PREV  (previous focusable item)
- *   button 1 alone       -> LV_KEY_NEXT  (next focusable item)
+ *   button 0 alone       -> LV_KEY_LEFT  (previous focusable item)
+ *   button 1 alone       -> LV_KEY_RIGHT (next focusable item)
  *   button 0 + button 1  -> LV_KEY_ENTER (confirm / activate)
  *
  * A single-button key is only committed after a short combo window so a
@@ -34,7 +34,7 @@ lv_indev_t* keymap_get_indev(void);
 /**
  * @brief The currently-active logical key (debounced), or 0 if none.
  *
- * Returns LV_KEY_PREV, LV_KEY_NEXT, LV_KEY_ENTER, or 0, mirroring the
+ * Returns LV_KEY_LEFT, LV_KEY_RIGHT, LV_KEY_ENTER, or 0, mirroring the
  * translation done for the keypad.  Useful for polling the live state of the
  * buttons.
  */

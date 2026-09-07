@@ -48,6 +48,11 @@ static void go_source(void);
 static void on_finish(void);
 static void on_finish_done(void);
 static void show_merge_screen(mnemonic_t* new_m, const char* source_desc);
+static void on_we_ok(void);
+static void on_we_error_cancel(void);
+static void on_we_error_retry(void);
+static void on_we_error_choose(void);
+static void on_we_word_selected(const char* word);
 static void on_new_wallet(lv_event_t* e);
 static void on_test_error(lv_event_t* e);
 
@@ -90,6 +95,7 @@ static void on_generate(void) {
 static word_entry_handle_t we_handle   = NULL;
 static mnemonic_t*         pending_new = NULL;
 static char                pending_desc[64];
+static char                we_entered[MNEMONIC_MAX_INPUT_LEN];
 
 static void on_enter_manual(void);
 static void on_we_complete(void);
@@ -627,21 +633,109 @@ static void on_we_complete(void) {
     }
     memcpy(buf, txt, txt_len);
     buf[txt_len] = '\0';
+    // Keep a copy so the error screen can offer to re-enter or auto-fix the
+    // last word.
+    strncpy(we_entered, buf, sizeof(we_entered) - 1);
+    we_entered[sizeof(we_entered) - 1] = '\0';
+
     ui_word_entry_discard(we_handle);
     we_handle = NULL;
 
     mnemonic_t* m = mnemonic_from_string(buf);
     secure_memzero(buf, sizeof(buf));
     if (!m) {
-        ui_show_msg("Invalid mnemonic");
-        ui_delay_ms(1500);
-        ui_show_main(on_new_wallet, on_test_error);
+        ui_show_mnemonic_error(on_we_error_cancel, on_we_error_retry, on_we_error_choose);
         return;
     }
-    char desc[48];
-    int  res = snprintf(desc, sizeof(desc), "entered %u-word", word_count);
-    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_ENTERED, desc);
+    int res = snprintf(pending_desc, sizeof(pending_desc), "entered %u-word", word_count);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
+
+    // Show the completed mnemonic and ask the user to confirm before it is
+    // used
+    pending_new = m;
+    ui_show_mnemonic(mnemonic_words(m), MNEMONIC_TYPE_ENTERED, on_we_ok, NULL);
+}
+
+static void on_we_ok(void) {
+    ASSERT_OR_DIE(pending_new, "no pending mnemonic");
+    mnemonic_t* m = pending_new;
+    pending_new   = NULL;
+
+    if (!current) {
+        // First source: the entered mnemonic was already shown for approval.
+        current = m;
+        ui_log_add("started with %s", pending_desc);
+        go_source();
+        return;
+    }
+    merge_or_reject(m, MNEMONIC_TYPE_ENTERED, pending_desc);
+}
+
+static void on_we_error_cancel(void) { go_source(); }
+
+// Copy the first (word_count - 1) words of `we_entered` into `prefix`.
+// Returns false if there is no separator (fewer than two words entered).
+static bool we_split_prefix(char* prefix, size_t cap) {
+    const char* last = strrchr(we_entered, ' ');
+    if (!last) return false;
+    size_t len = (size_t)(last - we_entered);
+    if (len >= cap) len = cap - 1;
+    memcpy(prefix, we_entered, len);
+    prefix[len] = '\0';
+    return true;
+}
+
+static void on_we_error_retry(void) {
+    // Re-enter only the last (checksum) word, keeping the first N-1 words.
+    char prefix[MNEMONIC_MAX_INPUT_LEN];
+    if (!we_split_prefix(prefix, sizeof(prefix)) || word_count == 0) {
+        on_enter_manual(); // nothing entered yet; start from scratch
+        return;
+    }
+    we_handle =
+        ui_word_entry_resume(word_count, word_count - 1, prefix, on_we_complete, on_we_cancel);
+}
+
+static void on_we_error_back(void) {
+    ui_show_mnemonic_error(on_we_error_cancel, on_we_error_retry, on_we_error_choose);
+}
+
+static void on_we_error_choose(void) {
+    static const char* candidates[128];
+    char               prefix[MNEMONIC_MAX_INPUT_LEN];
+    if (!we_split_prefix(prefix, sizeof(prefix))) {
+        on_generate(); // cannot determine a prefix; fall back to generation
+        return;
+    }
+    size_t count = mnemonic_last_word_candidates(we_entered, candidates, 128);
+    if (count == 0) {
+        on_generate(); // prefix not parseable; fall back to generation
+        return;
+    }
+    ui_show_word_picker("Choose Last Word", candidates, count, on_we_word_selected,
+                        on_we_error_back);
+}
+
+static void on_we_word_selected(const char* last_word) {
+    ASSERT_OR_DIE(last_word && *last_word, "null selected word");
+    char full[MNEMONIC_MAX_INPUT_LEN];
+    char prefix[MNEMONIC_MAX_INPUT_LEN];
+    if (!we_split_prefix(prefix, sizeof(prefix))) {
+        FATAL("missing mnemonic prefix for last-word selection");
+    }
+    int res = snprintf(full, sizeof(full), "%s %s", prefix, last_word);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(full), "mnemonic too long");
+
+    mnemonic_t* m = mnemonic_from_string(full);
+    secure_memzero(full, sizeof(full));
+    if (!m) {
+        FATAL("chosen last word failed validation");
+    }
+    res = snprintf(pending_desc, sizeof(pending_desc), "entered %u-word (chosen last word)",
+                   word_count);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
+    pending_new = m;
+    ui_show_mnemonic(mnemonic_words(m), MNEMONIC_TYPE_ENTERED, on_we_ok, NULL);
 }
 
 // -- Re-enter source with correct title based on state -----------------
@@ -677,6 +771,7 @@ static void on_finish_done(void) {
         ui_word_entry_discard(we_handle);
         we_handle = NULL;
     }
+    secure_memzero(we_entered, sizeof(we_entered));
     mnemonic_discard(current);
     current = NULL;
     ui_go_main();
