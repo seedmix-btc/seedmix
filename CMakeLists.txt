@@ -11,6 +11,7 @@ project(seedmix VERSION 0.1.0 LANGUAGES C)
 
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_BUTTONS "Enable button (keyboard) input emulation (Linux)" OFF)
+option(ENABLE_TDISPLAY "Use the TTGO T-Display screen size (240x135) on Linux" OFF)
 option(BUILD_TESTS "Build unit tests (Linux only)" OFF)
 option(ENABLE_COVERAGE "Enable code coverage instrumentation (gcov/lcov)" OFF)
 set(ENABLE_SANITIZERS "" CACHE STRING "Comma-separated sanitizers for tests (e.g. address,undefined)")
