@@ -74,3 +74,10 @@ if(ENABLE_ASAN)
     target_compile_options(${PROJECT_NAME} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
     target_link_options(${PROJECT_NAME} PRIVATE -fsanitize=address)
 endif()
+
+# -- Button input emulation ---------------------------------------------
+if(ENABLE_BUTTONS)
+    target_sources(${PROJECT_NAME} PRIVATE platform/linux/buttons_linux.c)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE ENABLE_BUTTONS)
+    message(STATUS "Button input emulation enabled (LEFT/RIGHT/ENTER)")
+endif()

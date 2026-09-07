@@ -286,6 +286,11 @@ void hal_camera_frame_free(hal_camera_frame_t* frame) {
 
 /* -- Touch / pointer input ------------------------------------------- */
 bool hal_touch_available(void) {
-    /* The SDL backend always registers a mouse pointer. */
+#ifdef ENABLE_BUTTONS
+    // Button-emulation build  (no touch)
+    return false;
+#else
+    // The SDL backend always registers a mouse pointer.
     return true;
+#endif
 }
