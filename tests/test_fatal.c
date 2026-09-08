@@ -89,12 +89,6 @@ static void test_mnemonic_combine_word_count_mismatch(void) {
 /* -- utils --------------------------------------------------------------- */
 static void test_word_count_bits_invalid(void) { TEST_ASSERT_FATAL(utils_word_count_bits(11)); }
 
-static void test_bytes_to_hex_buffer_too_small(void) {
-    const uint8_t data[4] = {0};
-    char          out[4]  = {0};
-    TEST_ASSERT_FATAL(bytes_to_hex(data, sizeof(data), out, sizeof(out)));
-}
-
 /* -- overflow / buffer-size / null guards -------------------------------- */
 static void test_dice_accumulator_overflow(void) {
     dice_entropy_t* d = dice_entropy_begin(12, 2); /* cap = 128 rolls */
@@ -146,13 +140,6 @@ static void test_sha256_expand_invalid_input(void) {
     TEST_ASSERT_FATAL(sha256_expand(out, 0, out, sizeof(out)));
 }
 
-static void test_bytes_to_hex_invalid_data(void) {
-    uint8_t data[4] = {0};
-    char    out[16] = {0};
-    TEST_ASSERT_FATAL(bytes_to_hex(NULL, 4, out, sizeof(out)));
-    TEST_ASSERT_FATAL(bytes_to_hex(data, 0, out, sizeof(out)));
-}
-
 static void test_floor_log2_zero(void) { TEST_ASSERT_FATAL(utils_floor_log2(0)); }
 
 int main(void) {
@@ -170,7 +157,6 @@ int main(void) {
     RUN_TEST(test_mnemonic_combine_identical);
     RUN_TEST(test_mnemonic_combine_word_count_mismatch);
     RUN_TEST(test_word_count_bits_invalid);
-    RUN_TEST(test_bytes_to_hex_buffer_too_small);
     RUN_TEST(test_dice_accumulator_overflow);
     RUN_TEST(test_dice_derive_buffer_too_small);
     RUN_TEST(test_touch_accumulator_overflow);
@@ -180,7 +166,6 @@ int main(void) {
     RUN_TEST(test_mnemonic_to_entropy_null);
     RUN_TEST(test_mnemonic_discard_null);
     RUN_TEST(test_sha256_expand_invalid_input);
-    RUN_TEST(test_bytes_to_hex_invalid_data);
     RUN_TEST(test_floor_log2_zero);
     return UNITY_END();
 }

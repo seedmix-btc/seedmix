@@ -1,6 +1,6 @@
 /**
  * @file fuzz/stubs.c
- * @brief Minimal fatal/hal stubs so fuzz targets can link crypto sources.
+ * @brief Minimal fatal/hal/log stubs so fuzz targets can link crypto sources.
  *
  * A FATAL during fuzzing aborts, which libFuzzer reports as a crash (a real
  * bug worth investigating).  The HAL random functions are unused by the
@@ -9,6 +9,7 @@
 
 #include "hal.h"
 #include "util/error.h"
+#include "util/log.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -18,6 +19,13 @@ NORETURN void fatal_handler(const char* file, int line, const char* fmt, ...) {
     (void)line;
     (void)fmt;
     abort();
+}
+
+void log_msg(const char* level, const char* file, int line, const char* fmt, ...) {
+    (void)level;
+    (void)file;
+    (void)line;
+    (void)fmt;
 }
 
 const char* hal_get_random_source(void) { return "fuzz"; }

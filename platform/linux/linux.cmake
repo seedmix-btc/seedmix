@@ -5,6 +5,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 
 # -- Find Dependencies --------------------------------------------------
 find_package(SDL2 REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # Build libwally from external/libwally-core (submodule)
 include(BuildLibWally)
@@ -43,6 +44,10 @@ add_executable(${PROJECT_NAME}
     ${COMMON_SOURCES}
     platform/linux/main_linux.c
     platform/linux/hal_linux.c
+    platform/linux/image_file.c
+    platform/linux/lvgl_gray.c
+    platform/linux/png_gray.c
+    platform/linux/gif_gray.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -59,6 +64,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     lvgl
     SDL2::SDL2
+    ZLIB::ZLIB
     m
     pthread
 )

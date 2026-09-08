@@ -30,7 +30,8 @@ jobs:
             automake \
             libtool \
             libtool-bin \
-            libsdl2-dev
+            libsdl2-dev \
+            zlib1g-dev
 
       - name: Build (${{ matrix.build }})
         run: bash scripts/build.sh ${{ matrix.build }}

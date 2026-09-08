@@ -55,6 +55,24 @@ extern "C" {
 #define LV_USE_FONT_COMPRESSED  1
 
 /*----------------------------------------------------------------------
+ * Image decoders
+ *----------------------------------------------------------------------*/
+/* The Linux HAL decodes the image file the user picked with LVGL's bundled
+ * JPEG and BMP decoders, which also need the POSIX file system driver to open
+ * it by path. */
+#if !defined(__EMSCRIPTEN__)
+    #define LV_USE_TJPGD        1   /* JPEG */
+    #define LV_USE_BMP          1   /* BMP */
+
+    #define LV_USE_FS_POSIX     1
+    #if LV_USE_FS_POSIX
+        #define LV_FS_POSIX_LETTER      'A' /* paths are passed as "A:/path/to/image.png" */
+        #define LV_FS_POSIX_PATH        ""
+        #define LV_FS_POSIX_CACHE_SIZE  0
+    #endif
+#endif
+
+/*----------------------------------------------------------------------
  * Features - enable what you need
  *----------------------------------------------------------------------*/
 #define LV_USE_SYSMON           0

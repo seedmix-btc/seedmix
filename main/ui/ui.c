@@ -32,8 +32,10 @@ static lv_obj_t* prev_screen = NULL; // track for deferred cleanup
 
 static lv_group_t* s_nav_group = NULL; // button navigation group (ESP32 keypad)
 
-static lv_obj_t*      camera_img = NULL;       // live camera feed image widget
-static lv_image_dsc_t camera_dsc;              // descriptor backing the live feed
+static lv_obj_t*      camera_img = NULL;      // live camera feed image widget
+static lv_image_dsc_t camera_dsc;             // descriptor backing the live feed
+static lv_coord_t     camera_preview_w = 300; // preview box (reference size) of the live feed
+static lv_coord_t     camera_preview_h = 200;
 static lv_image_dsc_t seedqr_dsc;              // descriptor backing the SeedQR image
 static uint8_t*       seedqr_buf       = NULL; // RGB565 buffer for the SeedQR image
 static size_t         seedqr_buf_bytes = 0;
@@ -241,7 +243,7 @@ static const struct {
 } btn_sizes[] = {
     [UI_BTN_SIZE_SMALL] = {80, 30, 14},  [UI_BTN_SIZE_MED] = {160, 44, 24},
     [UI_BTN_SIZE_LARGE] = {200, 44, 24}, [UI_BTN_SIZE_WIDE] = {180, 44, 24},
-    [UI_BTN_SIZE_HERO] = {240, 56, 28},
+    [UI_BTN_SIZE_HERO] = {360, 56, 28},
 };
 
 static lv_obj_t* add_btn_impl(lv_obj_t* parent, const char* text, ui_btn_size_t size,
@@ -413,14 +415,15 @@ void ui_show_splash(ui_cb_t on_done) {
 }
 
 /* -- Screens ---------------------------------------------------------- */
-void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
+void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
+                  lv_event_cb_t on_test_error) {
     ASSERT_OR_DIE(on_new_wallet, "null on_new_wallet");
     ASSERT_OR_DIE(on_test_error, "null on_test_error");
 
     if (!main_scr) {
         main_scr = ui_make_screen();
 
-        // Build main screen with "New Wallet" button
+        // Build main screen with main action buttons
         lv_obj_t* scr = main_scr;
         lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
 
@@ -430,8 +433,15 @@ void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
         lv_image_set_inner_align(logo, LV_IMAGE_ALIGN_STRETCH);
         lv_obj_align(logo, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(10));
 
-        ui_add_btn_evt(scr, "New Wallet", on_new_wallet, NULL, UI_BTN_SIZE_HERO, LV_ALIGN_CENTER, 0,
-                       0);
+        ui_add_btn_evt(scr, "Create Seed Mnemonic", on_new_wallet, NULL, UI_BTN_SIZE_HERO,
+                       LV_ALIGN_CENTER, 0, -30);
+
+        // Transaction/PSBT inspection is only meaningful with a camera.
+        if (hal_camera_available()) {
+            ASSERT_OR_DIE(on_inspect_tx, "null on_inspect_tx");
+            ui_add_btn_evt(scr, "Scan Transaction/PSBT", on_inspect_tx, NULL, UI_BTN_SIZE_HERO,
+                           LV_ALIGN_CENTER, 0, 30);
+        }
 
         // Test error button
         lv_obj_t* test_btn = ui_add_btn_evt(scr, "test error!", on_test_error, NULL,
@@ -780,12 +790,15 @@ void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Camera");
 
+    camera_preview_w = 300;
+    camera_preview_h = 200;
+
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     camera_dsc.header.cf    = LV_COLOR_FORMAT_RGB565;
 
     camera_img = lv_image_create(s);
-    lv_obj_set_size(camera_img, ui_scale(300), ui_scale(200));
+    lv_obj_set_size(camera_img, ui_scale(camera_preview_w), ui_scale(camera_preview_h));
     lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
 
     /* "Use Image" (left) and "Cancel" (right). */
@@ -801,8 +814,8 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
     ASSERT_OR_DIE(w > 0 && h > 0, "invalid camera frame size");
 
     // Fit the frame into the scaled preview area, preserving aspect ratio
-    uint32_t preview_w = (uint32_t)ui_scale(300);
-    uint32_t preview_h = (uint32_t)ui_scale(200);
+    uint32_t preview_w = (uint32_t)ui_scale(camera_preview_w);
+    uint32_t preview_h = (uint32_t)ui_scale(camera_preview_h);
     uint32_t disp_w = w, disp_h = h;
     if (w > preview_w || h > preview_h) {
         uint32_t zx = (256 * preview_w) / w;
@@ -893,25 +906,174 @@ void ui_seedqr_cleanup(void) {
     }
 }
 
-void ui_show_qr_scan(ui_cb_t on_scan, ui_cb_t on_cancel) {
-    ASSERT_OR_DIE(on_scan, "null on_scan");
+static lv_obj_t* qr_scan_bar    = NULL;
+static lv_obj_t* qr_scan_status = NULL;
+
+static void qr_scan_bar_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_bar = NULL;
+}
+
+static void qr_scan_status_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_status = NULL;
+}
+
+void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file) {
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ASSERT_OR_DIE(title, "null title");
+
+    /* Scanning an image file is only offered where the platform can do it
+     * (desktop and browser builds).  Its button sits next to Cancel, which
+     * costs a button row, so the live preview shrinks to make room. */
+    bool have_file_btn = on_open_file && hal_file_image_available();
 
     lv_obj_t* s = ui_make_screen();
-    ui_add_title(s, "Scan QR");
+    ui_add_title(s, title);
+
+    camera_preview_w = 300;
+    camera_preview_h = have_file_btn ? 160 : 200;
 
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     camera_dsc.header.cf    = LV_COLOR_FORMAT_RGB565;
 
     camera_img = lv_image_create(s);
-    lv_obj_set_size(camera_img, ui_scale(300), ui_scale(200));
+    lv_obj_set_size(camera_img, ui_scale(camera_preview_w), ui_scale(camera_preview_h));
     lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
 
-    ui_add_btn(s, "Scan", on_scan, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    /* Multipart progress: status text above a progress bar. */
+    qr_scan_status = lv_label_create(s);
+    lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+    lv_obj_set_style_text_color(qr_scan_status, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(qr_scan_status, ui_font(14), 0);
+    lv_obj_set_width(qr_scan_status, ui_scale(250));
+    lv_obj_align(qr_scan_status, LV_ALIGN_BOTTOM_LEFT, ui_scale(20),
+                 ui_scale(have_file_btn ? -90 : -50));
+    lv_obj_add_event_cb(qr_scan_status, qr_scan_status_delete_cb, LV_EVENT_DELETE, NULL);
+
+    qr_scan_bar = lv_bar_create(s);
+    lv_obj_set_size(qr_scan_bar, ui_scale(250), ui_scale(12));
+    lv_obj_align(qr_scan_bar, LV_ALIGN_BOTTOM_LEFT, ui_scale(20),
+                 ui_scale(have_file_btn ? -70 : -26));
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(0x222222), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(UI_COLOR_SEED_GREEN), LV_PART_INDICATOR);
+    lv_bar_set_range(qr_scan_bar, 0, 100);
+    lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+    lv_obj_add_event_cb(qr_scan_bar, qr_scan_bar_delete_cb, LV_EVENT_DELETE, NULL);
+
+    if (have_file_btn) {
+        ui_add_btn(s, "Open File", on_open_file, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    }
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
 
     ui_swap_screen(s);
+}
+
+void ui_qr_scan_progress(size_t received, size_t expected) {
+    if (expected == 0) {
+        if (qr_scan_status) lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+        if (qr_scan_bar) {
+            lv_bar_set_range(qr_scan_bar, 0, 100);
+            lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+        }
+        return;
+    }
+
+    char buf[40];
+    int  res = snprintf(buf, sizeof(buf), "Part %u of %u", (unsigned)received, (unsigned)expected);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(buf), "progress string too long");
+    if (qr_scan_status) lv_label_set_text(qr_scan_status, buf);
+    if (qr_scan_bar) {
+        lv_bar_set_range(qr_scan_bar, 0, (int32_t)expected);
+        lv_bar_set_value(qr_scan_bar, (int32_t)received, LV_ANIM_ON);
+    }
+}
+
+/* Shared layout for the "read this before going on" screens: an optional
+ * warning line, a scrollable text body (with arrow buttons on devices without
+ * touch) and a one- or two-button footer. */
+static void ui_show_text_screen(const char* title, const char* body, const char* warning,
+                                const char* ok_label, ui_cb_t on_ok, const char* cancel_label,
+                                ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(body, "null body");
+    ASSERT_OR_DIE(ok_label, "null ok_label");
+    ASSERT_OR_DIE(on_ok, "null on_ok");
+    ASSERT_OR_DIE(!cancel_label || on_cancel, "cancel label without callback");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t body_top = ui_scale(50);
+
+    if (warning && warning[0]) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, warning);
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(12), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(w, ui_scale(440));
+        lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+        lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+        lv_obj_update_layout(w);
+        body_top = ui_scale(50) + lv_obj_get_height(w) + ui_scale(8);
+    }
+
+    lv_coord_t cont_h = LV_VER_RES - body_top - ui_scale(60);
+    if (cont_h < ui_scale(40)) cont_h = ui_scale(40);
+
+    /* On devices without touch the summary is scrolled with the arrow buttons,
+     * so leave room for them at the right of the screen instead of hanging
+     * them off the edge of the body. */
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, cont_h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), body_top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, body_top);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+
+    lv_obj_t* lbl = lv_label_create(cont);
+    lv_label_set_text(lbl, body);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+    lv_obj_set_width(lbl, body_w - ui_scale(16));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_scroll_to_y(cont, 0, LV_ANIM_OFF); /* always start at the first line */
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), body_top);
+    }
+
+    if (cancel_label) {
+        /* The accepting button is created first so a button-only device starts
+         * with it focused: a stray press must not discard what was scanned. */
+        ui_add_btn(s, ok_label, on_ok, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+        ui_add_btn(s, cancel_label, on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    } else {
+        ui_add_btn(s, ok_label, on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    }
+
+    ui_swap_screen(s);
+}
+
+void ui_show_tx_inspect(const char* title, const char* body, const char* warning, ui_cb_t on_done) {
+    ui_show_text_screen(title, body, warning, "Done", on_done, NULL, NULL);
+}
+
+void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on_continue,
+                                 ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ui_show_text_screen(title, body, NULL, "Continue", on_continue, "Cancel", on_cancel);
 }
 
 void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export) {
@@ -1078,6 +1240,108 @@ void ui_show_msg(const char* msg) {
     lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
     ui_swap_screen(s);
     lv_refr_now(NULL);
+}
+
+void ui_show_confirm(const char* title, const char* msg, const char* yes_label,
+                     const char* no_label, ui_cb_t on_yes, ui_cb_t on_no) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(msg, "null msg");
+    ASSERT_OR_DIE(yes_label, "null yes_label");
+    ASSERT_OR_DIE(no_label, "null no_label");
+    ASSERT_OR_DIE(on_yes, "null on_yes");
+    ASSERT_OR_DIE(on_no, "null on_no");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_obj_t* l = lv_label_create(s);
+    lv_label_set_text(l, msg);
+    lv_obj_set_style_text_color(l, lv_color_white(), 0);
+    lv_obj_set_style_text_font(l, ui_font(18), 0);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(l, ui_scale(440));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, ui_scale(-30));
+
+    ui_add_btn(s, yes_label, on_yes, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    ui_add_btn(s, no_label, on_no, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+
+    ui_swap_screen(s);
+}
+
+/* -- Choice list ------------------------------------------------------ */
+typedef struct {
+    ui_uint_cb_t cb;
+    uint8_t      index;
+} choice_ctx_t;
+
+static void choice_invoke_cb(lv_event_t* e) {
+    choice_ctx_t* ctx = (choice_ctx_t*)lv_event_get_user_data(e);
+    if (ctx && ctx->cb) ctx->cb(ctx->index);
+}
+
+static void choice_ctx_delete_cb(lv_event_t* e) {
+    choice_ctx_t* ctx = (choice_ctx_t*)lv_obj_get_user_data(lv_event_get_target(e));
+    if (ctx) lv_free(ctx);
+}
+
+void ui_show_choice(const char* title, const char* msg, const char* const* options, size_t count,
+                    ui_uint_cb_t on_choice, ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(options, "null options");
+    ASSERT_OR_DIE(on_choice, "null on_choice");
+    ASSERT_OR_DIE(count > 0 && count <= 255, "invalid option count");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t top = ui_scale(60);
+    if (msg && msg[0]) {
+        lv_obj_t* m = lv_label_create(s);
+        lv_label_set_text(m, msg);
+        lv_obj_set_style_text_color(m, lv_color_white(), 0);
+        lv_obj_set_style_text_font(m, ui_font(14), 0);
+        lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(m, ui_scale(440));
+        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+        lv_obj_align(m, LV_ALIGN_TOP_MID, 0, ui_scale(52));
+        lv_obj_update_layout(m);
+        top = ui_scale(52) + lv_obj_get_height(m) + ui_scale(10);
+    }
+
+    /* The list scrolls, so it is not limited by the screen height. */
+    lv_coord_t avail = LV_VER_RES - top - ui_scale(56);
+    if (avail < ui_scale(44)) avail = ui_scale(44);
+
+    lv_obj_t* list = lv_obj_create(s);
+    lv_obj_set_size(list, ui_scale(440), avail);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, top);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, ui_scale(8), 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+
+    for (size_t i = 0; i < count; i++) {
+        choice_ctx_t* ctx = lv_malloc(sizeof(*ctx));
+        ASSERT_OR_DIE(ctx, "choice ctx alloc");
+        ctx->cb    = on_choice;
+        ctx->index = (uint8_t)i;
+
+        lv_obj_t* b = ui_add_btn(list, options[i], NULL, UI_BTN_SIZE_HERO, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_user_data(b, ctx);
+        lv_obj_add_event_cb(b, choice_invoke_cb, LV_EVENT_CLICKED, ctx);
+        lv_obj_add_event_cb(b, choice_ctx_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+
+    if (on_cancel)
+        ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
 }
 
 static lv_obj_t* mnemonic_error_btn(lv_obj_t* parent, const char* text, ui_cb_t cb,

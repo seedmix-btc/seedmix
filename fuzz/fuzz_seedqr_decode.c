@@ -1,10 +1,6 @@
 /**
  * @file fuzz/fuzz_seedqr_decode.c
- * @brief libFuzzer target for the SeedQR decoders (untrusted camera-scan input).
- *
- * Exercises seedqr_standard_decode() (48/96-char digit streams) and
- * seedqr_compact_decode() (raw 16/32-byte entropy).  Both must return NULL or
- * a valid mnemonic without crashing on arbitrary input.
+ * @brief libFuzzer target for the SeedQR decoders
  */
 
 #include "crypto/mnemonic.h"
