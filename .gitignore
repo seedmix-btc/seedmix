@@ -11,6 +11,9 @@ managed_components/
 *.elf
 *.bin
 
+# Committed SeedQR test vectors (binary payloads, see tests/vectors/seedqr/raw/)
+!tests/vectors/seedqr/raw/*.compact.bin
+
 # IDE
 .vscode/
 .idea/

@@ -243,7 +243,7 @@ static const struct {
 } btn_sizes[] = {
     [UI_BTN_SIZE_SMALL] = {80, 30, 14},  [UI_BTN_SIZE_MED] = {160, 44, 24},
     [UI_BTN_SIZE_LARGE] = {200, 44, 24}, [UI_BTN_SIZE_WIDE] = {180, 44, 24},
-    [UI_BTN_SIZE_HERO] = {240, 56, 28},
+    [UI_BTN_SIZE_HERO] = {360, 56, 28},
 };
 
 static lv_obj_t* add_btn_impl(lv_obj_t* parent, const char* text, ui_btn_size_t size,
@@ -415,14 +415,15 @@ void ui_show_splash(ui_cb_t on_done) {
 }
 
 /* -- Screens ---------------------------------------------------------- */
-void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
+void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
+                  lv_event_cb_t on_test_error) {
     ASSERT_OR_DIE(on_new_wallet, "null on_new_wallet");
     ASSERT_OR_DIE(on_test_error, "null on_test_error");
 
     if (!main_scr) {
         main_scr = ui_make_screen();
 
-        // Build main screen with "New Wallet" button
+        // Build main screen with main action buttons
         lv_obj_t* scr = main_scr;
         lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
 
@@ -432,8 +433,15 @@ void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
         lv_image_set_inner_align(logo, LV_IMAGE_ALIGN_STRETCH);
         lv_obj_align(logo, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(10));
 
-        ui_add_btn_evt(scr, "New Wallet", on_new_wallet, NULL, UI_BTN_SIZE_HERO, LV_ALIGN_CENTER, 0,
-                       0);
+        ui_add_btn_evt(scr, "Create Seed Mnemonic", on_new_wallet, NULL, UI_BTN_SIZE_HERO,
+                       LV_ALIGN_CENTER, 0, -30);
+
+        // Transaction/PSBT inspection is only meaningful with a camera.
+        if (hal_camera_available()) {
+            ASSERT_OR_DIE(on_inspect_tx, "null on_inspect_tx");
+            ui_add_btn_evt(scr, "Scan Transaction/PSBT", on_inspect_tx, NULL, UI_BTN_SIZE_HERO,
+                           LV_ALIGN_CENTER, 0, 30);
+        }
 
         // Test error button
         lv_obj_t* test_btn = ui_add_btn_evt(scr, "test error!", on_test_error, NULL,
@@ -895,12 +903,25 @@ void ui_seedqr_cleanup(void) {
     }
 }
 
-void ui_show_qr_scan(ui_cb_t on_scan, ui_cb_t on_cancel) {
-    ASSERT_OR_DIE(on_scan, "null on_scan");
+static lv_obj_t* qr_scan_bar    = NULL;
+static lv_obj_t* qr_scan_status = NULL;
+
+static void qr_scan_bar_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_bar = NULL;
+}
+
+static void qr_scan_status_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_status = NULL;
+}
+
+void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title) {
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ASSERT_OR_DIE(title, "null title");
 
     lv_obj_t* s = ui_make_screen();
-    ui_add_title(s, "Scan QR");
+    ui_add_title(s, title);
 
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -910,8 +931,96 @@ void ui_show_qr_scan(ui_cb_t on_scan, ui_cb_t on_cancel) {
     lv_obj_set_size(camera_img, ui_scale(300), ui_scale(200));
     lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
 
-    ui_add_btn(s, "Scan", on_scan, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    /* Multipart progress: status text above a progress bar. */
+    qr_scan_status = lv_label_create(s);
+    lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+    lv_obj_set_style_text_color(qr_scan_status, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(qr_scan_status, ui_font(14), 0);
+    lv_obj_set_width(qr_scan_status, ui_scale(250));
+    lv_obj_align(qr_scan_status, LV_ALIGN_BOTTOM_LEFT, ui_scale(20), ui_scale(-50));
+    lv_obj_add_event_cb(qr_scan_status, qr_scan_status_delete_cb, LV_EVENT_DELETE, NULL);
+
+    qr_scan_bar = lv_bar_create(s);
+    lv_obj_set_size(qr_scan_bar, ui_scale(250), ui_scale(12));
+    lv_obj_align(qr_scan_bar, LV_ALIGN_BOTTOM_LEFT, ui_scale(20), ui_scale(-26));
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(0x222222), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(UI_COLOR_SEED_GREEN), LV_PART_INDICATOR);
+    lv_bar_set_range(qr_scan_bar, 0, 100);
+    lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+    lv_obj_add_event_cb(qr_scan_bar, qr_scan_bar_delete_cb, LV_EVENT_DELETE, NULL);
+
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+
+    ui_swap_screen(s);
+}
+
+void ui_qr_scan_progress(size_t received, size_t expected) {
+    if (expected == 0) {
+        if (qr_scan_status) lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+        if (qr_scan_bar) {
+            lv_bar_set_range(qr_scan_bar, 0, 100);
+            lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+        }
+        return;
+    }
+
+    char buf[40];
+    int  res = snprintf(buf, sizeof(buf), "Part %u of %u", (unsigned)received, (unsigned)expected);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(buf), "progress string too long");
+    if (qr_scan_status) lv_label_set_text(qr_scan_status, buf);
+    if (qr_scan_bar) {
+        lv_bar_set_range(qr_scan_bar, 0, (int32_t)expected);
+        lv_bar_set_value(qr_scan_bar, (int32_t)received, LV_ANIM_ON);
+    }
+}
+
+void ui_show_tx_inspect(const char* title, const char* body, const char* warning, ui_cb_t on_done) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(body, "null body");
+    ASSERT_OR_DIE(on_done, "null on_done");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t body_top = ui_scale(50);
+
+    if (warning && warning[0]) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, warning);
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(12), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(w, ui_scale(440));
+        lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+        lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+        lv_obj_update_layout(w);
+        body_top = ui_scale(50) + lv_obj_get_height(w) + ui_scale(8);
+    }
+
+    lv_coord_t cont_h = LV_VER_RES - body_top - ui_scale(60);
+    if (cont_h < ui_scale(40)) cont_h = ui_scale(40);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, ui_scale(440), cont_h);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, body_top);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+
+    lv_obj_t* lbl = lv_label_create(cont);
+    lv_label_set_text(lbl, body);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+    lv_obj_set_width(lbl, ui_scale(420));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+
+    if (!hal_touch_available()) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align_to(arrows, cont, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
+    }
+
+    ui_add_btn(s, "Done", on_done, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
 }
@@ -1080,6 +1189,33 @@ void ui_show_msg(const char* msg) {
     lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
     ui_swap_screen(s);
     lv_refr_now(NULL);
+}
+
+void ui_show_confirm(const char* title, const char* msg, const char* yes_label,
+                     const char* no_label, ui_cb_t on_yes, ui_cb_t on_no) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(msg, "null msg");
+    ASSERT_OR_DIE(yes_label, "null yes_label");
+    ASSERT_OR_DIE(no_label, "null no_label");
+    ASSERT_OR_DIE(on_yes, "null on_yes");
+    ASSERT_OR_DIE(on_no, "null on_no");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_obj_t* l = lv_label_create(s);
+    lv_label_set_text(l, msg);
+    lv_obj_set_style_text_color(l, lv_color_white(), 0);
+    lv_obj_set_style_text_font(l, ui_font(18), 0);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(l, ui_scale(440));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, ui_scale(-30));
+
+    ui_add_btn(s, yes_label, on_yes, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    ui_add_btn(s, no_label, on_no, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+
+    ui_swap_screen(s);
 }
 
 static lv_obj_t* mnemonic_error_btn(lv_obj_t* parent, const char* text, ui_cb_t cb,

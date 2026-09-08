@@ -12,7 +12,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define QR_SIDE_MAX 512u
+/* Largest side accepted by qr_decode().  Must exceed the camera's largest
+ * dimension (the Linux HAL requests 640x480), otherwise webcam frames are
+ * rejected outright before quirc gets a chance to decode them. */
+#define QR_SIDE_MAX 1024u
 #define QR_SIZE_MAX (QR_SIDE_MAX * QR_SIDE_MAX)
 
 bool qr_encode(const uint8_t* data, size_t len, qr_mode_t mode, qr_grid_t* out) {

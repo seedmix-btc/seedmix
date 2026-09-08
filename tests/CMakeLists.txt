@@ -38,12 +38,23 @@ add_library(seedmix_test_util STATIC
     ${CMAKE_SOURCE_DIR}/main/crypto/mnemonic.c
     ${CMAKE_SOURCE_DIR}/main/crypto/bip39_wordlist.c
     ${CMAKE_SOURCE_DIR}/main/crypto/seedqr.c
+    ${CMAKE_SOURCE_DIR}/main/crypto/txinspect.c
+    ${CMAKE_SOURCE_DIR}/main/crypto/descriptor.c
+    ${CMAKE_SOURCE_DIR}/main/crypto/ur_descriptor.c
+    ${CMAKE_SOURCE_DIR}/main/crypto/ur.c
+    ${CMAKE_SOURCE_DIR}/main/crypto/fountain.c
     ${CMAKE_SOURCE_DIR}/main/qr/qr.c
     ${CMAKE_SOURCE_DIR}/main/crypto/touch.c
     ${CMAKE_SOURCE_DIR}/main/crypto/dice.c
     ${CMAKE_SOURCE_DIR}/main/crypto/coin.c
     support/fatal_stub.c
     support/hal_stub.c
+    support/vectors.c
+)
+
+# Location of the generated vectors consumed at runtime by the test suites.
+target_compile_definitions(seedmix_test_util PUBLIC
+    TEST_VECTORS_DIR="${CMAKE_SOURCE_DIR}/tests/vectors"
 )
 
 target_include_directories(seedmix_test_util PUBLIC
@@ -92,6 +103,10 @@ set_tests_properties(seedmix_fatal_tests PROPERTIES
 seedmix_add_test(seedmix_touch_tests          test_touch.c)
 seedmix_add_test(seedmix_seedqr_tests         test_seedqr.c)
 seedmix_add_test(seedmix_qr_tests             test_qr.c)
+seedmix_add_test(seedmix_txinspect_tests      test_txinspect.c)
+seedmix_add_test(seedmix_descriptor_tests     test_descriptor.c)
+seedmix_add_test(seedmix_ur_descriptor_tests  test_ur_descriptor.c)
+seedmix_add_test(seedmix_ur_tests             test_ur.c)
 
 # Convenience target built by scripts/test.sh
 get_property(_test_exes GLOBAL PROPERTY SEEDMIX_TEST_EXECUTABLES)

@@ -18,7 +18,7 @@ typedef enum {
     UI_BTN_SIZE_MED,   // 160 x 44 confirm/back buttons
     UI_BTN_SIZE_LARGE, // 200 x 44 primary navigation buttons
     UI_BTN_SIZE_WIDE,  // 180 x 44 side-by-side action buttons
-    UI_BTN_SIZE_HERO,  // 240 x 56 hero call-to-action
+    UI_BTN_SIZE_HERO,  // 360 x 56 hero call-to-action
 } ui_btn_size_t;
 
 lv_obj_t* ui_make_screen(void);
