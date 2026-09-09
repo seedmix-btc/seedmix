@@ -83,6 +83,12 @@ seedmix_add_test(seedmix_secure_stack_tests   test_secure_stack.c)
 seedmix_add_test(seedmix_bip39_wordlist_tests test_bip39_wordlist.c)
 seedmix_add_test(seedmix_kat_tests            test_kat.c)
 seedmix_add_test(seedmix_fatal_tests          test_fatal.c)
+# The "death" tests intentionally longjmp out of FATAL paths, abandoning heap
+# allocations made before the fault (on a real device fatal() aborts the
+# device).  Leak detection therefore does not apply to this suite
+set_tests_properties(seedmix_fatal_tests PROPERTIES
+    ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0"
+)
 seedmix_add_test(seedmix_touch_tests          test_touch.c)
 seedmix_add_test(seedmix_seedqr_tests         test_seedqr.c)
 seedmix_add_test(seedmix_qr_tests             test_qr.c)
