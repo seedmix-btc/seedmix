@@ -110,7 +110,7 @@ jobs:
             -DENABLE_SANITIZERS=address,undefined \
             -DLVGL_DIR="$PWD/external/lvgl"
           cmake --build build-asan --target seedmix_tests -- -j"$(nproc)"
-          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
             ctest --test-dir build-asan --output-on-failure
 
   fuzz:

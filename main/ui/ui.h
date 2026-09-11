@@ -27,7 +27,8 @@ typedef enum {
     MNEMONIC_TYPE_FINAL,
 } mnemonic_type_t;
 
-void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error);
+void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
+                  lv_event_cb_t on_test_error);
 void ui_show_word_count(ui_cb_t on_12, ui_cb_t on_24);
 void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter, ui_cb_t on_other_source,
                     ui_cb_t on_state, ui_cb_t on_finish, bool is_additional);
@@ -37,7 +38,9 @@ void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel);
 void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h);
 void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done);
 void ui_seedqr_cleanup(void);
-void ui_show_qr_scan(ui_cb_t on_scan, ui_cb_t on_cancel);
+void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title);
+void ui_qr_scan_progress(size_t received, size_t expected);
+void ui_show_tx_inspect(const char* title, const char* body, const char* warning, ui_cb_t on_done);
 void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel);
 void ui_touch_screen_set_status(const char* text);
 void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back);
@@ -55,6 +58,16 @@ void ui_show_merge_process(const char* current_words, const char* current_entrop
                            const char* new_entropy_hex, const char* merged_entropy_hex,
                            const char* merged_words, ui_cb_t on_ok);
 void ui_show_msg(const char* msg);
+
+/**
+ * @brief Show a two-button confirmation screen.
+ *
+ * @p on_yes / @p on_no are called when the corresponding button is pressed.
+ * This is used for the "scan a wallet descriptor first?" prompt that precedes
+ * transaction/PSBT scanning.
+ */
+void ui_show_confirm(const char* title, const char* msg, const char* yes_label,
+                     const char* no_label, ui_cb_t on_yes, ui_cb_t on_no);
 void ui_show_mnemonic_error(ui_cb_t on_cancel, ui_cb_t on_retry, ui_cb_t on_choose);
 void ui_show_word_picker(const char* title, const char* const* words, size_t count,
                          ui_word_cb_t on_select, ui_cb_t on_back);

@@ -7,8 +7,11 @@
 #include "crypto/mnemonic.h"
 #include "crypto/seedqr.h"
 #include "unity.h"
+#include "vectors.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -125,6 +128,69 @@ static void test_vector4_spec(void) {
     mnemonic_discard(m);
 }
 
+/* -- Generated SeedQR vectors (tests/vectors/seedqr/) ------------------- */
+static void test_seedqr_vector_files(void) {
+    char** slugs   = NULL;
+    size_t n_slugs = 0;
+    TEST_ASSERT_TRUE(vectors_list_slugs("seedqr/raw", ".compact.bin", &slugs, &n_slugs));
+    TEST_ASSERT_TRUE(n_slugs > 0);
+
+    for (size_t s = 0; s < n_slugs; s++) {
+        const char* slug = slugs[s];
+        char        path[256];
+
+        snprintf(path, sizeof(path), "seedqr/raw/%s.compact.bin", slug);
+        size_t   ent_len = 0;
+        uint8_t* entropy = vectors_read_file(path, &ent_len);
+        TEST_ASSERT_NOT_NULL(entropy);
+        TEST_ASSERT_TRUE(ent_len == 16 || ent_len == 32);
+
+        snprintf(path, sizeof(path), "seedqr/raw/%s.standard.txt", slug);
+        char* digits = (char*)vectors_read_file(path, NULL);
+        TEST_ASSERT_NOT_NULL(digits);
+        vectors_trim(digits);
+
+        snprintf(path, sizeof(path), "seedqr/raw/%s.mnemonic.txt", slug);
+        char* words = (char*)vectors_read_file(path, NULL);
+        TEST_ASSERT_NOT_NULL(words);
+        vectors_trim(words);
+
+        /* entropy -> mnemonic must match the reference words */
+        mnemonic_t* m = mnemonic_from_entropy(entropy, ent_len);
+        TEST_ASSERT_NOT_NULL(m);
+        TEST_ASSERT_EQUAL_STRING(words, mnemonic_words(m));
+
+        /* CompactSeedQR roundtrip */
+        uint8_t compact[32];
+        size_t  clen = seedqr_compact_encode(m, compact, sizeof(compact));
+        TEST_ASSERT_EQUAL_UINT(ent_len, (unsigned)clen);
+        TEST_ASSERT_EQUAL_MEMORY(entropy, compact, ent_len);
+
+        mnemonic_t* dc = seedqr_compact_decode(entropy, ent_len);
+        TEST_ASSERT_NOT_NULL(dc);
+        TEST_ASSERT_EQUAL_STRING(words, mnemonic_words(dc));
+        mnemonic_discard(dc);
+
+        /* Standard SeedQR roundtrip */
+        char   enc[SEEDQR_STANDARD_24_DIGITS + 1];
+        size_t elen = seedqr_standard_encode(m, enc, sizeof(enc));
+        TEST_ASSERT_EQUAL_UINT(strlen(digits), (unsigned)elen);
+        TEST_ASSERT_EQUAL_STRING(digits, enc);
+
+        mnemonic_t* ds = seedqr_standard_decode(digits);
+        TEST_ASSERT_NOT_NULL(ds);
+        TEST_ASSERT_EQUAL_STRING(words, mnemonic_words(ds));
+        mnemonic_discard(ds);
+
+        mnemonic_discard(m);
+        free(words);
+        free(digits);
+        free(entropy);
+    }
+
+    vectors_free_slugs(slugs, n_slugs);
+}
+
 /* -- Error / boundary paths -------------------------------------------- */
 
 static void test_compact_decode_invalid_len(void) {
@@ -216,6 +282,7 @@ int main(void) {
     RUN_TEST(test_standard_roundtrip_24);
     RUN_TEST(test_standard_zeros_12);
     RUN_TEST(test_vector4_spec);
+    RUN_TEST(test_seedqr_vector_files);
     RUN_TEST(test_compact_decode_invalid_len);
     RUN_TEST(test_compact_encode_short_buffer);
     RUN_TEST(test_standard_decode_null_and_bad_length);

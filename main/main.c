@@ -5,10 +5,14 @@
 
 #include "app.h"
 #include "crypto/coin.h"
+#include "crypto/descriptor.h"
 #include "crypto/dice.h"
 #include "crypto/mnemonic.h"
 #include "crypto/seedqr.h"
 #include "crypto/touch.h"
+#include "crypto/txinspect.h"
+#include "crypto/ur.h"
+#include "crypto/ur_descriptor.h"
 #include "hal.h"
 #include "lvgl.h"
 #include "qr/qr.h"
@@ -34,8 +38,17 @@ static void on_camera_image(void);
 static void on_camera_use(void);
 static void on_camera_cancel(void);
 static void on_scan_qr(void);
-static void on_qr_scan(void);
+static void on_seedqr_payload(const uint8_t* payload, size_t plen);
 static void on_qr_scan_cancel(void);
+static void on_inspect_tx(lv_event_t* e);
+static void on_tx_payload(const uint8_t* payload, size_t plen);
+static void on_descriptor_payload(const uint8_t* payload, size_t plen);
+static void on_inspect_tx_cancel(void);
+static void on_inspect_tx_done(void);
+static void on_descriptor_cancel(void);
+static void on_scan_descriptor(void);
+static void on_skip_descriptor(void);
+static void start_tx_scan(void);
 static void on_export_seedqr(void);
 static void on_export_done(void);
 static void on_dice_rolls(void);
@@ -53,8 +66,9 @@ static void on_we_error_cancel(void);
 static void on_we_error_retry(void);
 static void on_we_error_choose(void);
 static void on_we_word_selected(const char* word);
-static void on_new_wallet(lv_event_t* e);
+static void on_create_mnemonic(lv_event_t* e);
 static void on_test_error(lv_event_t* e);
+static void show_main_screen(void);
 
 static void on_generating_msg(const char* msg) {
     ui_show_msg(msg);
@@ -165,6 +179,37 @@ static hal_camera_frame_t camera_frame;  /* latest captured frame (owned) */
 static uint8_t*           camera_rgb565; /* RGB565 preview buffer (owned, reused) */
 static uint32_t           camera_w = 0, camera_h = 0;
 static lv_timer_t*        camera_timer = NULL; /* live feed timer */
+
+static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_t* gray);
+
+/* Continuous QR scanning: the live feed auto-decodes and dispatches payloads. */
+typedef void (*qr_payload_cb_t)(const uint8_t* payload, size_t plen);
+static qr_payload_cb_t qr_scan_cb       = NULL;
+static unsigned        qr_scan_tick     = 0;
+static uint8_t*        qr_scan_last     = NULL; /* last decoded payload (dedup) */
+static size_t          qr_scan_last_len = 0;
+static uint8_t*        qr_gray_buf      = NULL; /* reusable grayscale buffer */
+static size_t          qr_gray_len      = 0;
+static uint8_t*        qr_payload_buf   = NULL; /* reusable decode buffer */
+
+static void qr_scan_stop(void) {
+    qr_scan_cb   = NULL;
+    qr_scan_tick = 0;
+    if (qr_scan_last) {
+        free(qr_scan_last);
+        qr_scan_last     = NULL;
+        qr_scan_last_len = 0;
+    }
+    if (qr_gray_buf) {
+        free(qr_gray_buf);
+        qr_gray_buf = NULL;
+        qr_gray_len = 0;
+    }
+    if (qr_payload_buf) {
+        free(qr_payload_buf);
+        qr_payload_buf = NULL;
+    }
+}
 
 static inline uint8_t clip8(int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
 
@@ -305,9 +350,41 @@ static void camera_feed_tick(lv_timer_t* t) {
 
     camera_frame_to_rgb565(&camera_frame, camera_rgb565);
     ui_camera_feed_update(camera_rgb565, camera_w, camera_h);
+
+    if (qr_scan_cb && (++qr_scan_tick % 3u) == 0) {
+        /* Throttled continuous decode: scan every 3rd frame (~360 ms). */
+        size_t need = (size_t)camera_w * camera_h;
+        if (!qr_gray_buf || qr_gray_len < need) {
+            free(qr_gray_buf);
+            qr_gray_buf = malloc(need);
+            ASSERT_OR_DIE(qr_gray_buf, "out of memory");
+            qr_gray_len = need;
+        }
+        if (!qr_payload_buf) {
+            qr_payload_buf = malloc(TXINSPECT_MAX_PAYLOAD);
+            ASSERT_OR_DIE(qr_payload_buf, "out of memory");
+        }
+
+        rgb565_to_gray(camera_rgb565, camera_w, camera_h, qr_gray_buf);
+        size_t plen = 0;
+        if (qr_decode(qr_gray_buf, camera_w, camera_h, qr_payload_buf, TXINSPECT_MAX_PAYLOAD,
+                      &plen)) {
+            bool dup = qr_scan_last && qr_scan_last_len == plen &&
+                       memcmp(qr_scan_last, qr_payload_buf, plen) == 0;
+            if (!dup) {
+                if (qr_scan_last) free(qr_scan_last);
+                qr_scan_last = malloc(plen ? plen : 1);
+                ASSERT_OR_DIE(qr_scan_last, "out of memory");
+                memcpy(qr_scan_last, qr_payload_buf, plen);
+                qr_scan_last_len = plen;
+                qr_scan_cb(qr_payload_buf, plen);
+            }
+        }
+    }
 }
 
 static void camera_feed_stop(void) {
+    qr_scan_stop();
     if (camera_timer) {
         lv_timer_delete(camera_timer);
         camera_timer = NULL;
@@ -384,7 +461,8 @@ static void on_scan_qr(void) {
     }
     camera = hal_camera_open();
     ASSERT_OR_DIE(camera, "Failed to open camera.");
-    ui_show_qr_scan(on_qr_scan, on_qr_scan_cancel);
+    qr_scan_cb = on_seedqr_payload;
+    ui_show_qr_scan_auto(on_qr_scan_cancel, "Scan SeedQR");
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
 }
 
@@ -394,55 +472,242 @@ static void on_qr_scan_cancel(void) {
                          go_source);
 }
 
-static void on_qr_scan(void) {
-    if (camera_timer) {
-        lv_timer_delete(camera_timer);
-        camera_timer = NULL;
-    }
-    if (camera) {
-        hal_camera_close(camera);
-        camera = NULL;
-    }
-    if (!camera_rgb565 || camera_w == 0 || camera_h == 0) {
-        camera_release();
-        FATAL("No camera image captured yet.");
-    }
+static void on_seedqr_payload(const uint8_t* payload, size_t plen) {
+    mnemonic_t* m = NULL;
 
-    uint8_t* gray = malloc((size_t)camera_w * camera_h);
-    ASSERT_OR_DIE(gray, "out of memory");
-    rgb565_to_gray(camera_rgb565, camera_w, camera_h, gray);
-
-    uint8_t     payload[256];
-    size_t      plen = 0;
-    mnemonic_t* m    = NULL;
-
-    if (qr_decode(gray, camera_w, camera_h, payload, sizeof(payload), &plen)) {
-        if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
-            char digits[SEEDQR_STANDARD_24_DIGITS + 1];
-            memcpy(digits, payload, plen);
-            digits[plen] = '\0';
-            m            = seedqr_standard_decode(digits);
-        } else if (plen == 16 || plen == 32) {
-            m = seedqr_compact_decode(payload, plen);
-        }
+    if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
+        char digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        memcpy(digits, payload, plen);
+        digits[plen] = '\0';
+        m            = seedqr_standard_decode(digits);
+        secure_memzero(digits, sizeof(digits));
+    } else if (plen == 16 || plen == 32) {
+        m = seedqr_compact_decode(payload, plen);
     }
 
-    secure_memzero(gray, (size_t)camera_w * camera_h);
-    free(gray);
-    camera_release();
+    if (!m) return; /* not a SeedQR; keep scanning */
 
-    if (!m) {
-        ui_show_msg("No valid SeedQR found");
-        ui_delay_ms(1500);
-        on_qr_scan_cancel();
-        return;
-    }
+    camera_feed_stop();
 
     unsigned wc = (mnemonic_entropy_size(m) == 32) ? 24 : 12;
     char     desc[48];
     int      res = snprintf(desc, sizeof(desc), "scanned %u-word SeedQR", wc);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_ENTERED, desc);
+}
+
+/* -- Inspect transaction/PSBT ---------------------------------------- */
+static tx_inspect_t*      inspected   = NULL;
+static ur_psbt_decoder_t* ur_decoder  = NULL;
+static descriptor_t*      wallet_desc = NULL;
+
+static void ur_decoder_reset(void) {
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = ur_psbt_decoder_new();
+}
+
+/* Descriptor UR decoder: lives only while the descriptor QR is being scanned
+ * (it accumulates the animated multi-part fragments of a large descriptor). */
+static ur_descriptor_decoder_t* desc_decoder = NULL;
+
+static void desc_decoder_reset(void) {
+    ur_descriptor_decoder_free(desc_decoder);
+    desc_decoder = ur_descriptor_decoder_new();
+}
+
+static void desc_decoder_stop(void) {
+    ur_descriptor_decoder_free(desc_decoder);
+    desc_decoder = NULL;
+}
+
+/* Classify an output address against the scanned wallet descriptor (if any). */
+static tx_output_kind_t classify_output(void* ctx, size_t out_index, const char* address) {
+    (void)out_index;
+    descriptor_t* d = ctx;
+    if (!d) return TX_OUTPUT_NONE;
+    switch (descriptor_classify(d, address)) {
+    case DESCRIPTOR_MATCH_CHANGE:
+        return TX_OUTPUT_CHANGE;
+    case DESCRIPTOR_MATCH_RECEIVE:
+        return TX_OUTPUT_RECEIVE;
+    case DESCRIPTOR_MATCH_NONE:
+        return TX_OUTPUT_NONE;
+    }
+    return TX_OUTPUT_NONE;
+}
+
+static void show_inspected_tx(void) {
+    char* body = malloc(TXINSPECT_RENDER_MAX);
+    ASSERT_OR_DIE(body, "out of memory");
+    tx_inspect_render_ex(inspected, body, TXINSPECT_RENDER_MAX, classify_output, wallet_desc);
+
+    char* warning = malloc(TXINSPECT_WARNING_MAX);
+    ASSERT_OR_DIE(warning, "out of memory");
+    bool warn = tx_inspect_nonce_warning(inspected, warning, TXINSPECT_WARNING_MAX);
+
+    ui_show_tx_inspect(tx_inspect_kind_name(inspected), body, warn ? warning : NULL,
+                       on_inspect_tx_done);
+
+    // The UI has copied the strings it needs; scrub and release the buffers.
+    secure_memzero(warning, TXINSPECT_WARNING_MAX);
+    free(warning);
+    secure_memzero(body, TXINSPECT_RENDER_MAX);
+    free(body);
+}
+
+/* Ask whether to scan a wallet descriptor first, so change outputs can be
+ * flagged on the transaction summary. */
+static void on_inspect_tx(lv_event_t* e) {
+    (void)e;
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    ui_show_confirm("Scan Transaction/PSBT",
+                    "Scan a wallet descriptor first?\n\nA descriptor lets you "
+                    "verify which outputs are your change.",
+                    "Scan descriptor", "Just scan", on_scan_descriptor, on_skip_descriptor);
+}
+
+static void on_skip_descriptor(void) { start_tx_scan(); }
+
+static void on_scan_descriptor(void) {
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb = on_descriptor_payload;
+    desc_decoder_reset();
+    ui_show_qr_scan_auto(on_descriptor_cancel, "Scan Wallet Descriptor");
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_descriptor_cancel(void) {
+    camera_feed_stop();
+    desc_decoder_stop();
+    on_inspect_tx(NULL);
+}
+
+static void descriptor_accept(descriptor_status_t st, descriptor_t* d) {
+    if (!d) {
+        if (st == DESCRIPTOR_ERR_PRIVATE) {
+            camera_feed_stop();
+            desc_decoder_stop();
+            ui_show_msg("Descriptor has private keys.\nScan a public (xpub) descriptor.");
+            ui_delay_ms(2000);
+            on_inspect_tx(NULL);
+        } else if (st == DESCRIPTOR_ERR_TOO_LONG) {
+            camera_feed_stop();
+            desc_decoder_stop();
+            ui_show_msg("Descriptor is too long to scan.");
+            ui_delay_ms(2000);
+            on_inspect_tx(NULL);
+        }
+        return; /* not a descriptor (or an unsupported one); keep scanning */
+    }
+
+    camera_feed_stop();
+    desc_decoder_stop();
+    wallet_desc = d;
+    start_tx_scan();
+}
+
+static void on_descriptor_payload(const uint8_t* payload, size_t plen) {
+    /* UR-encoded descriptor: single-part or animated multi-part
+     * ur:output-descriptor / ur:crypto-output. */
+    if (plen >= 3 && (payload[0] == 'u' || payload[0] == 'U') &&
+        (payload[1] == 'r' || payload[1] == 'R') && payload[2] == ':') {
+        if (!desc_decoder) desc_decoder = ur_descriptor_decoder_new();
+
+        char* text = NULL;
+        int   r    = ur_descriptor_decoder_receive(desc_decoder, (const char*)payload, plen, &text);
+        if (r == 0) {
+            ui_qr_scan_progress(ur_descriptor_decoder_received(desc_decoder),
+                                ur_descriptor_decoder_expected(desc_decoder));
+        } else if (r == 1) {
+            descriptor_status_t st = DESCRIPTOR_ERR_NOT_DESC;
+            descriptor_t*       d  = descriptor_parse((const uint8_t*)text, strlen(text), &st);
+            secure_memzero(text, strlen(text));
+            free(text);
+            descriptor_accept(st, d);
+        }
+        return; /* not a descriptor UR part; keep scanning */
+    }
+
+    descriptor_status_t st = DESCRIPTOR_ERR_NOT_DESC;
+    descriptor_t*       d  = descriptor_parse(payload, plen, &st);
+    descriptor_accept(st, d);
+}
+
+static void start_tx_scan(void) {
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    ur_decoder_reset();
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb = on_tx_payload;
+    ui_show_qr_scan_auto(on_inspect_tx_cancel, "Scan Transaction/PSBT");
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_inspect_tx_cancel(void) {
+    camera_feed_stop();
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = NULL;
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    show_main_screen();
+}
+
+static void on_inspect_tx_done(void) {
+    tx_inspect_free(inspected);
+    inspected = NULL;
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = NULL;
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    show_main_screen();
+}
+
+static void on_tx_payload(const uint8_t* payload, size_t plen) {
+    /* UR-encoded PSBT: single-part or animated multi-part (fountain). */
+    if (plen >= 3 && (payload[0] == 'u' || payload[0] == 'U') &&
+        (payload[1] == 'r' || payload[1] == 'R') && payload[2] == ':') {
+        if (!ur_decoder) ur_decoder = ur_psbt_decoder_new();
+
+        uint8_t* psbt     = NULL;
+        size_t   psbt_len = 0;
+        int r = ur_psbt_decoder_receive(ur_decoder, (const char*)payload, plen, &psbt, &psbt_len);
+
+        if (r == 1) {
+            inspected = tx_inspect_parse(psbt, psbt_len);
+            secure_memzero(psbt, psbt_len);
+            free(psbt);
+            camera_feed_stop();
+            if (!inspected) {
+                ui_show_msg("Not a valid PSBT");
+                ui_delay_ms(1500);
+                on_inspect_tx_cancel();
+                return;
+            }
+            show_inspected_tx();
+        } else if (r == 0) {
+            ui_qr_scan_progress(ur_psbt_decoder_received(ur_decoder),
+                                ur_psbt_decoder_expected(ur_decoder));
+        }
+        /* r == -1: not a valid PSBT UR part; keep scanning. */
+        return;
+    }
+
+    /* Raw transaction / PSBT (hex or base64). */
+    inspected = tx_inspect_parse(payload, plen);
+    if (!inspected) return; /* not recognised; keep scanning */
+
+    camera_feed_stop();
+    show_inspected_tx();
 }
 
 static void on_export_seedqr(void) {
@@ -787,8 +1052,8 @@ static void on_finish(void) {
     ui_log_add("finished");
 }
 
-/* -- Entry: "New Wallet" button --------------------------------------- */
-static void on_new_wallet(lv_event_t* e) {
+/* -- Entry: "Create Mnemonic Seed" button --------------------------------------- */
+static void on_create_mnemonic(lv_event_t* e) {
     (void)e;
     ASSERT_OR_DIE(!current, "current mnemonic should be NULL");
     ASSERT_OR_DIE(!we_handle, "word entry handle should be NULL");
@@ -802,7 +1067,9 @@ static void on_test_error(lv_event_t* e) {
 }
 
 /* -- Initialization --------------------------------------------------- */
-static void show_main_screen(void) { ui_show_main(on_new_wallet, on_test_error); }
+static void show_main_screen(void) {
+    ui_show_main(on_create_mnemonic, on_inspect_tx, on_test_error);
+}
 
 void app_init(void) {
     lv_display_t* disp = lv_display_get_default();

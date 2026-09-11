@@ -80,3 +80,25 @@ SEEDQR_DEPS=(
 )
 
 run_fuzzer fuzz_seedqr_decode "${SEEDQR_DEPS[@]}" "${PROJECT_ROOT}/fuzz/fuzz_seedqr_decode.c"
+
+run_fuzzer fuzz_txinspect \
+    "${PROJECT_ROOT}/main/crypto/txinspect.c" \
+    "${PROJECT_ROOT}/main/crypto/ur.c" \
+    "${PROJECT_ROOT}/main/crypto/fountain.c" \
+    "${PROJECT_ROOT}/main/util/utils.c" \
+    "${PROJECT_ROOT}/fuzz/stubs.c" \
+    "${PROJECT_ROOT}/fuzz/fuzz_txinspect.c"
+
+run_fuzzer fuzz_ur \
+    "${PROJECT_ROOT}/main/crypto/ur.c" \
+    "${PROJECT_ROOT}/main/crypto/fountain.c" \
+    "${PROJECT_ROOT}/fuzz/fuzz_ur.c"
+
+run_fuzzer fuzz_ur_descriptor \
+    "${PROJECT_ROOT}/main/crypto/ur_descriptor.c" \
+    "${PROJECT_ROOT}/main/crypto/ur.c" \
+    "${PROJECT_ROOT}/main/crypto/fountain.c" \
+    "${PROJECT_ROOT}/main/crypto/descriptor.c" \
+    "${PROJECT_ROOT}/main/util/utils.c" \
+    "${PROJECT_ROOT}/fuzz/stubs.c" \
+    "${PROJECT_ROOT}/fuzz/fuzz_ur_descriptor.c"

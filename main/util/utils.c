@@ -26,30 +26,35 @@ void secure_memzero(void* ptr, size_t len) {
 #endif
 }
 
-void bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size) {
-    ASSERT_OR_DIE(data && len > 0, "invalid data");
-    ASSERT_OR_DIE(out, "null output buffer");
-    ASSERT_OR_DIE(out_size >= len * 2 + 1, "hex buffer too small");
+bool bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size) {
+    if (!data || len == 0 || !out) return false;
+    if (out_size == 0 || len > (out_size - 1) / 2) return false;
     for (size_t i = 0; i < len; i++) {
         int res = snprintf(out + i * 2, 3, "%02x", data[i]);
-        ASSERT_OR_DIE(res > 0 && (size_t)res < 3, "hex formatting failed");
+        if (res < 0 || (size_t)res >= 3) return false;
     }
     out[len * 2] = '\0';
+    return true;
 }
 
-void hex_to_bytes(const char* hex, char* out, size_t out_size) {
-    ASSERT_OR_DIE(hex, "null hex input");
-    ASSERT_OR_DIE(out, "null output buffer");
-    size_t hex_len = strlen(hex);
-    ASSERT_OR_DIE(hex_len % 2 == 0, "hex string must have even length");
-    ASSERT_OR_DIE(out_size == hex_len / 2, "output buffer size incorrect");
+static int hex_digit_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+bool hex_to_bytes(const char* hex, size_t hex_len, uint8_t* out, size_t out_size) {
+    if ((hex_len & 1u) || !out || out_size < hex_len / 2) return false;
+    if (hex_len && !hex) return false;
 
     for (size_t i = 0; i < hex_len / 2; i++) {
-        unsigned int byte;
-        int          res = sscanf(hex + i * 2, "%2x", &byte);
-        ASSERT_OR_DIE(res == 1, "hex parsing failed");
-        out[i] = (char)byte;
+        int hi = hex_digit_val(hex[2 * i]);
+        int lo = hex_digit_val(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
     }
+    return true;
 }
 
 void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t out_len) {
