@@ -48,12 +48,10 @@ static void wipe_label_texts(lv_obj_t* obj) {
     }
     if (lv_obj_has_class(obj, &lv_label_class)) {
         lv_label_t* label = (lv_label_t*)obj;
-        if (label->text) secure_memzero(label->text, strlen(label->text));
-        if (label->dot_tmp_alloc && label->dot.tmp_ptr) {
-            secure_memzero(label->dot.tmp_ptr, strlen(label->dot.tmp_ptr));
-        } else {
-            secure_memzero(label->dot.tmp, sizeof(label->dot.tmp));
+        if (label->text && !label->static_txt) {
+            secure_memzero(label->text, strlen(label->text));
         }
+        secure_memzero(label->dot, sizeof(label->dot));
     }
 }
 

@@ -84,7 +84,7 @@ ensure_emsdk() {
     "${emsdk_dir}/emsdk" activate "$emsdk_ver"
 }
 
-clone_pinned "external/lvgl"          "https://github.com/lvgl/lvgl.git"                     "aa7446344c6ec7631112ef031983ef24077e24d5" "v9.2.0"
+clone_pinned "external/lvgl"          "https://github.com/lvgl/lvgl.git"                     "85aa60d18b3d5e5588d7b247abf90198f07c8a63" "v9.5.0"
 clone_pinned "external/libwally-core" "https://github.com/ElementsProject/libwally-core.git" "0c41f38fb1c201786e9c3ac9eae4f5f80c051399" "release_1.5.6"
 clone_pinned "external/libqrencode"   "https://github.com/fukuchi/libqrencode.git"           "715e29fd4cd71b6e452ae0f4e36d917b43122ce8" "v4.1.1"
 clone_pinned "external/quirc"         "https://github.com/dlbeer/quirc.git"                  "542848dd6b9b0eaa9587bbf25b9bc67bd8a71fca" "v1.2"
