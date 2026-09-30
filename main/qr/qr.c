@@ -78,17 +78,24 @@ bool qr_decode(const uint8_t* gray, uint32_t w, uint32_t h, uint8_t* payload, si
 
     bool ok = false;
     int  n  = quirc_count(q);
-    for (int i = 0; i < n; i++) {
-        struct quirc_code code;
-        struct quirc_data data;
-        quirc_extract(q, i, &code);
-        if (quirc_decode(&code, &data) == QUIRC_SUCCESS && (size_t)data.payload_len > 0 &&
-            (size_t)data.payload_len <= payload_cap) {
-            memcpy(payload, data.payload, data.payload_len);
-            *out_len = data.payload_len;
-            ok       = true;
-            break;
+
+    if (n > 0) {
+        struct quirc_code* code = malloc(sizeof(*code));
+        struct quirc_data* data = malloc(sizeof(*data));
+        if (code && data) {
+            for (int i = 0; i < n; i++) {
+                quirc_extract(q, i, code);
+                if (quirc_decode(code, data) == QUIRC_SUCCESS && (size_t)data->payload_len > 0 &&
+                    (size_t)data->payload_len <= payload_cap) {
+                    memcpy(payload, data->payload, data->payload_len);
+                    *out_len = data->payload_len;
+                    ok       = true;
+                    break;
+                }
+            }
         }
+        free(code);
+        free(data);
     }
 
     quirc_destroy(q);

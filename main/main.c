@@ -360,6 +360,22 @@ static bool qr_scan_deliver(qr_source_t source, const uint8_t* payload, size_t p
     return qr_scan_cb(source, payload, plen);
 }
 
+// Pixels for the preview and decoder. Reuse the HAL buffer when it is already
+// native-endian RGB565; converting copies 600 KB per VGA frame for nothing.
+static const uint8_t* camera_frame_pixels(void) {
+    if (camera_frame.pixfmt == HAL_CAMERA_FMT_RGB565 &&
+        (size_t)camera_frame.bytes_per_line == (size_t)camera_w * 2u) {
+        return camera_frame.data;
+    }
+
+    if (!camera_rgb565) {
+        camera_rgb565 = calloc((size_t)camera_w * camera_h, 2);
+        ASSERT_OR_DIE(camera_rgb565, "out of memory for camera preview");
+    }
+    camera_frame_to_rgb565(&camera_frame, camera_rgb565);
+    return camera_rgb565;
+}
+
 static void camera_feed_tick(lv_timer_t* t) {
     (void)t;
 
@@ -373,17 +389,16 @@ static void camera_feed_tick(lv_timer_t* t) {
 
     hal_camera_frame_t next;
     memset(&next, 0, sizeof(next));
+    const uint32_t t_grab = lv_tick_get();
     if (!hal_camera_grab(camera, &next)) {
         return; /* keep showing the previous frame */
     }
 
+    // Release is timed separately: it zeroes 600 KB before freeing, which is
+    // measurable at VGA.
+    const uint32_t t_release = lv_tick_get();
     hal_camera_frame_free(&camera_frame);
     camera_frame = next;
-
-    LOG_INFO("camera frame: %ux%u pixfmt=%s size=%zu bytes_per_line=%u",
-             (unsigned)camera_frame.width, (unsigned)camera_frame.height,
-             camera_pixfmt_name(camera_frame.pixfmt), camera_frame.size,
-             (unsigned)camera_frame.bytes_per_line);
 
     if (camera_frame.width != camera_w || camera_frame.height != camera_h) {
         /* dimensions changed - drop the stale preview buffer */
@@ -396,14 +411,11 @@ static void camera_feed_tick(lv_timer_t* t) {
         camera_h = camera_frame.height;
     }
 
-    if (!camera_rgb565) {
-        camera_rgb565 = calloc((size_t)camera_w * camera_h, 2);
-        ASSERT_OR_DIE(camera_rgb565, "out of memory for camera preview");
-    }
+    const uint32_t t_preview = lv_tick_get();
+    const uint8_t* pixels    = camera_frame_pixels();
+    ui_camera_feed_update(pixels, camera_w, camera_h);
 
-    camera_frame_to_rgb565(&camera_frame, camera_rgb565);
-    ui_camera_feed_update(camera_rgb565, camera_w, camera_h);
-
+    const uint32_t t_decode = lv_tick_get();
     if (qr_scan_cb && (++qr_scan_tick % 3u) == 0) {
         /* Throttled continuous decode: scan every 3rd frame (~360 ms). */
         size_t need = (size_t)camera_w * camera_h;
@@ -418,7 +430,7 @@ static void camera_feed_tick(lv_timer_t* t) {
             ASSERT_OR_DIE(qr_payload_buf, "out of memory");
         }
 
-        rgb565_to_gray(camera_rgb565, camera_w, camera_h, qr_gray_buf);
+        rgb565_to_gray(pixels, camera_w, camera_h, qr_gray_buf);
         size_t plen = 0;
         if (qr_decode(qr_gray_buf, camera_w, camera_h, qr_payload_buf, TXINSPECT_MAX_PAYLOAD,
                       &plen)) {
@@ -427,6 +439,17 @@ static void camera_feed_tick(lv_timer_t* t) {
             (void)qr_scan_deliver(QR_SOURCE_CAMERA, qr_payload_buf, plen);
         }
     }
+    const uint32_t t_end = lv_tick_get();
+
+    // Decode runs every 3rd frame; the per-stage times show where a slow frame
+    // goes.
+    LOG_INFO("camera frame: %ux%u pixfmt=%s stride=%u size=%zu | grab %ums release %ums "
+             "preview %ums decode %ums total %ums",
+             (unsigned)camera_frame.width, (unsigned)camera_frame.height,
+             camera_pixfmt_name(camera_frame.pixfmt), (unsigned)camera_frame.bytes_per_line,
+             camera_frame.size, (unsigned)(t_release - t_grab), (unsigned)(t_preview - t_release),
+             (unsigned)(t_decode - t_preview), (unsigned)(t_end - t_decode),
+             (unsigned)(t_end - t_grab));
 }
 
 static void camera_feed_stop(void) {
@@ -513,8 +536,8 @@ static void qr_scan_screen_show(void) {
 
     /* The camera keeps streaming while a message is up, so the new screen
      * starts from the last frame instead of an empty box. */
-    if (camera_rgb565 && camera_w && camera_h) {
-        ui_camera_feed_update(camera_rgb565, camera_w, camera_h);
+    if (camera_w && camera_h && camera_frame.data) {
+        ui_camera_feed_update(camera_frame_pixels(), camera_w, camera_h);
     }
 }
 

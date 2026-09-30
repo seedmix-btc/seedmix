@@ -20,9 +20,24 @@ void secure_memzero(void* ptr, size_t len) {
     // Non-elidable wipe from the C library
     explicit_bzero(ptr, len);
 #else
-    // Portable fallback (e.g. ESP-IDF newlib): volatile store loop
-    volatile uint8_t* p = (volatile uint8_t*)ptr;
-    while (len--) *p++ = 0;
+    // Portable fallback (e.g. ESP-IDF newlib): stores stay volatile so the
+    // compiler cannot elide the wipe. Word-wide where alignment allows.
+    volatile uint8_t* bytes = (volatile uint8_t*)ptr;
+
+    size_t head = sizeof(uintptr_t) - ((size_t)(uintptr_t)ptr & (sizeof(uintptr_t) - 1u));
+    if (head == sizeof(uintptr_t)) head = 0;
+    if (head > len) head = len;
+    for (size_t i = 0; i < head; i++) bytes[i] = 0;
+    bytes += head;
+    len -= head;
+
+    while (len >= sizeof(uintptr_t)) {
+        *(volatile uintptr_t*)(void*)bytes = 0;
+        bytes += sizeof(uintptr_t);
+        len -= sizeof(uintptr_t);
+    }
+
+    while (len--) *bytes++ = 0;
 #endif
 }
 

@@ -15,9 +15,11 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "i2c_bus.h"
 #include "keymap.h"
 #include "lvgl.h"
 #include "sdkconfig.h"
+#include "touchscreen.h"
 #include "ui.h"
 
 /* -- Hardening: no radio ---------------------------------------------- */
@@ -50,7 +52,21 @@ void app_main(void) {
     lv_init();
     lv_tick_set_cb(lvgl_tick_cb);
 
+    // Shared I2C bus first: the touchscreen and the IO expander (panel reset)
+    // hang off it.
+    const esp_err_t i2c_err = i2c_bus_init();
+    if (i2c_err != ESP_OK) {
+        ESP_LOGE(TAG, "I2C bus init failed: %s", esp_err_to_name(i2c_err));
+    }
+
     display_init();
+
+    // Touch is optional: keep the UI usable through the buttons if it fails.
+    const esp_err_t touch_err = touchscreen_init();
+    if (touch_err != ESP_OK && touch_err != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "touchscreen init failed: %s", esp_err_to_name(touch_err));
+    }
+
     buttons_init();
     keymap_init();
     ui_nav_set_indev(keymap_get_indev());
@@ -65,8 +81,28 @@ void app_main(void) {
         app_init();
     }
 
+    uint32_t last_busy_log = 0;
     while (1) {
-        lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        // lv_timer_handler() returns how long until the next timer is due
+        const uint32_t busy_start = lv_tick_get();
+        uint32_t       wait_ms    = lv_timer_handler();
+        const uint32_t busy_ms    = lv_tick_get() - busy_start;
+        const uint32_t flushed    = display_flush_pixels_take();
+
+        // A slow pass means LVGL spent it rendering the live preview; the pixel
+        // count says whether it was render- or transfer-bound. One line/second.
+        if (busy_ms >= 30 && (busy_start - last_busy_log) >= 1000) {
+            last_busy_log = busy_start;
+            ESP_LOGI(TAG, "lvgl pass took %u ms, flushed %u px", (unsigned)busy_ms,
+                     (unsigned)flushed);
+        }
+
+        if (wait_ms == 0 || wait_ms > 10) {
+            wait_ms = 10;
+        }
+        // vTaskDelay(0) only yields, starving the idle task and tripping the
+        // watchdog, so always give up at least one tick.
+        const TickType_t ticks = pdMS_TO_TICKS(wait_ms);
+        vTaskDelay(ticks ? ticks : 1);
     }
 }

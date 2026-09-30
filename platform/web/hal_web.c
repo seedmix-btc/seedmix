@@ -163,6 +163,17 @@ bool hal_camera_grab(hal_camera_t* cam, hal_camera_frame_t* out) {
     return true;
 }
 
+// The browser hands back whatever the user picked, so there is no size to
+// switch; the UI hides its control where this is false.
+bool hal_camera_size_switchable(void) { return false; }
+
+hal_camera_size_t hal_camera_size(void) { return HAL_CAMERA_SIZE_QVGA; }
+
+bool hal_camera_set_size(hal_camera_size_t size) {
+    (void)size;
+    return false;
+}
+
 void hal_camera_close(hal_camera_t* cam) {
     if (!cam) return;
     EM_ASM({

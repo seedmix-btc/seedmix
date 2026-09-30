@@ -46,6 +46,17 @@ typedef enum {
 } hal_camera_pixfmt_t;
 
 /**
+ * @brief Capture sizes a platform can switch between while streaming.
+ *
+ * Only these are reachable with hal_camera_set_size().
+ */
+typedef enum {
+    HAL_CAMERA_SIZE_QVGA = 0, /**< 320x240. */
+    HAL_CAMERA_SIZE_VGA,      /**< 640x480. */
+    HAL_CAMERA_SIZE_COUNT,    /**< Number of sizes (not a size itself). */
+} hal_camera_size_t;
+
+/**
  * @brief A single captured camera frame.
  *
  * The `data` buffer is owned by this struct and must be released with
@@ -107,6 +118,29 @@ bool hal_camera_grab(hal_camera_t* cam, hal_camera_frame_t* out);
  * @param cam  Camera session to release (may be NULL).
  */
 void hal_camera_close(hal_camera_t* cam);
+
+/**
+ * @brief Whether hal_camera_set_size() can change the capture size here.
+ *
+ * False where the size is fixed (desktop and browser), so the UI can hide its
+ * resolution control.
+ */
+bool hal_camera_size_switchable(void);
+
+/** @brief The capture size frames are currently produced at. */
+hal_camera_size_t hal_camera_size(void);
+
+/**
+ * @brief Switch the capture size while the camera is streaming.
+ *
+ * The camera restarts, so the first frames may be dark while the sensor
+ * settles. A session from hal_camera_open() stays valid. On failure the
+ * previous size is kept.
+ *
+ * @param size  Capture size (must be < HAL_CAMERA_SIZE_COUNT).
+ * @return true if the camera now captures at @p size.
+ */
+bool hal_camera_set_size(hal_camera_size_t size);
 
 /**
  * @brief Release a frame dequeued with hal_camera_grab().

@@ -5,6 +5,8 @@ external/
 build*/
 sdkconfig
 sdkconfig.old
+# Board stamp written by scripts/build_esp32.sh
+.sdkconfig.board
 managed_components/
 *.o
 *.a

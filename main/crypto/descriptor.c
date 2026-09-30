@@ -65,6 +65,20 @@ static size_t func_name_at(const char* s, char* out, size_t cap) {
     return n;
 }
 
+/* Join "outer(inner)" into `out`, truncating if needed. Hand-rolled because the
+ * snprintf form trips -Werror=format-truncation at -O2. */
+static void shape_join(char* out, size_t cap, const char* outer, const char* inner) {
+    if (cap == 0) return;
+    size_t n = 0;
+    for (size_t i = 0; outer[i] && n + 1 < cap; i++) out[n++] = outer[i];
+    if (inner[0] && n + 1 < cap) {
+        out[n++] = '(';
+        for (size_t i = 0; inner[i] && n + 1 < cap; i++) out[n++] = inner[i];
+        if (n + 1 < cap) out[n++] = ')';
+    }
+    out[n] = '\0';
+}
+
 /* Describe the script shape of descriptor text @p s, e.g. "wpkh", "tr",
  * "sh(wpkh)" or "wsh(sortedmulti)".  The two nesting wrappers are spelled out
  * because sh()/wsh() decide the address type; anything deeper (a miniscript
@@ -88,7 +102,7 @@ static void shape_of(const char* s, char* out, size_t cap) {
 
     char inner[DESCRIPTOR_SHAPE_MAX / 2];
     if (func_name_at(s + n + 1, inner, sizeof(inner)) > 0)
-        snprintf(out, cap, "%s(%s)", outer, inner);
+        shape_join(out, cap, outer, inner);
     else
         snprintf(out, cap, "%s", outer);
 }

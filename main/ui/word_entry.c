@@ -163,8 +163,11 @@ static void we_confirm(lv_event_t* e) {
     ASSERT_OR_DIE(c, "null context");
     lv_obj_t* confirm_screen = lv_obj_get_parent(lv_event_get_target(e));
     if (!c->selected[0]) return;
-    strncpy(c->prefix, c->selected, sizeof(c->prefix) - 1);
-    c->selected[0] = '\0';
+    const size_t len  = strlen(c->selected);
+    const size_t copy = (len < sizeof(c->prefix)) ? len : sizeof(c->prefix) - 1;
+    memcpy(c->prefix, c->selected, copy);
+    c->prefix[copy] = '\0';
+    c->selected[0]  = '\0';
     ui_word_entry_next(c); // loads entry_screen first
     lv_obj_delete(confirm_screen);
 }

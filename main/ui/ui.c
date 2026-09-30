@@ -32,10 +32,19 @@ static lv_obj_t* prev_screen = NULL; // track for deferred cleanup
 
 static lv_group_t* s_nav_group = NULL; // button navigation group (ESP32 keypad)
 
-static lv_obj_t*      camera_img = NULL;      // live camera feed image widget
-static lv_image_dsc_t camera_dsc;             // descriptor backing the live feed
-static lv_coord_t     camera_preview_w = 300; // preview box (reference size) of the live feed
-static lv_coord_t     camera_preview_h = 200;
+static lv_obj_t*      camera_img = NULL;           // live camera feed image widget
+static lv_image_dsc_t camera_dsc;                  // descriptor backing the live feed
+static lv_coord_t     camera_preview_w      = 300; // preview box (reference size) of the live feed
+static lv_coord_t     camera_preview_h      = 200;
+static bool           camera_preview_square = false; // fill the box with the frame's centre square
+static uint16_t*      camera_square_buf     = NULL;  // downscaled square, see camera_square_build()
+static lv_coord_t     camera_square_side    = 0;     // its side in pixels (0 = no buffer)
+
+// Capture size names, indexed by hal_camera_size_t.
+static const char* const s_camera_size_names[HAL_CAMERA_SIZE_COUNT] = {
+    [HAL_CAMERA_SIZE_QVGA] = "QVGA",
+    [HAL_CAMERA_SIZE_VGA]  = "VGA",
+};
 static lv_image_dsc_t seedqr_dsc;              // descriptor backing the SeedQR image
 static uint8_t*       seedqr_buf       = NULL; // RGB565 buffer for the SeedQR image
 static size_t         seedqr_buf_bytes = 0;
@@ -783,6 +792,33 @@ void ui_coin_set_status(const char* text) {
     if (coin_status) lv_label_set_text(coin_status, text);
 }
 
+// Capture-size control, shared by the camera screens. Only offered where the
+// platform can change size, so the button is never a no-op.
+static const char* camera_size_name(void) {
+    const hal_camera_size_t size = hal_camera_size();
+    return (size < HAL_CAMERA_SIZE_COUNT) ? s_camera_size_names[size] : "?";
+}
+
+static void camera_size_btn_cb(lv_event_t* e) {
+    lv_obj_t* target = lv_event_get_target(e);
+
+    const hal_camera_size_t next =
+        (hal_camera_size_t)(((unsigned)hal_camera_size() + 1u) % (unsigned)HAL_CAMERA_SIZE_COUNT);
+    (void)hal_camera_set_size(next);
+
+    // Read the label back from the HAL: a refused switch must not leave the
+    // button claiming a size the camera is not using.
+    lv_obj_t* label = target ? lv_obj_get_child(target, 0) : NULL;
+    if (label) lv_label_set_text(label, camera_size_name());
+}
+
+// Top-right: the scan screen's progress bar already owns the bottom middle.
+static void add_camera_size_btn(lv_obj_t* parent) {
+    if (!hal_camera_size_switchable() || !hal_camera_available()) return;
+    ui_add_btn_evt(parent, camera_size_name(), camera_size_btn_cb, NULL, UI_BTN_SIZE_SMALL,
+                   LV_ALIGN_TOP_RIGHT, -10, 5);
+}
+
 void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
     ASSERT_OR_DIE(on_use, "null on_use");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
@@ -790,8 +826,9 @@ void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Camera");
 
-    camera_preview_w = 300;
-    camera_preview_h = 200;
+    camera_preview_w      = 300;
+    camera_preview_h      = 200;
+    camera_preview_square = false; // this screen shows the whole frame
 
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -804,14 +841,91 @@ void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
     /* "Use Image" (left) and "Cancel" (right). */
     ui_add_btn(s, "Use Image", on_use, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    add_camera_size_btn(s);
 
     ui_swap_screen(s);
+}
+
+// Average four RGB565 pixels channel by channel, so packing loses nothing.
+static uint16_t camera_avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
+    const uint32_t r = ((a >> 11) + (b >> 11) + (c >> 11) + (d >> 11)) >> 2;
+    const uint32_t g =
+        (((a >> 5) & 0x3Fu) + ((b >> 5) & 0x3Fu) + ((c >> 5) & 0x3Fu) + ((d >> 5) & 0x3Fu)) >> 2;
+    const uint32_t bl = ((a & 0x1Fu) + (b & 0x1Fu) + (c & 0x1Fu) + (d & 0x1Fu)) >> 2;
+    return (uint16_t)((r << 11) | (g << 5) | bl);
+}
+
+// Downscale the frame's centre square to `side` pixels by averaging 2x2
+// blocks. Doing it here keeps LVGL out of the scaling: its scaled draw was
+// ~27 ms for this 200x200 box and tore the panel while it ran.
+static bool camera_square_build(const uint8_t* frame, uint32_t w, uint32_t h, lv_coord_t side) {
+    if (side <= 0) return false;
+
+    if (camera_square_side != side) {
+        free(camera_square_buf);
+        camera_square_buf  = malloc((size_t)side * (size_t)side * 2u);
+        camera_square_side = camera_square_buf ? side : 0;
+    }
+    if (!camera_square_buf) return false;
+
+    const uint32_t  src_side = (w < h) ? w : h; // the frame's centred square
+    const uint32_t  x0       = (w - src_side) / 2u;
+    const uint32_t  y0       = (h - src_side) / 2u;
+    const uint16_t* src      = (const uint16_t*)frame;
+
+    // Source step per output pixel in 16.16: Xtensa has no divide instruction.
+    const uint32_t step = ((uint32_t)src_side << 16) / (uint32_t)side;
+
+    for (lv_coord_t y = 0; y < side; y++) {
+        const uint32_t  sy  = y0 + (((uint32_t)y * step) >> 16);
+        const uint16_t* r0  = src + (size_t)sy * w + x0;
+        const uint16_t* r1  = (sy + 1u < y0 + src_side) ? r0 + w : r0;
+        uint16_t*       out = camera_square_buf + (size_t)y * (size_t)side;
+
+        for (lv_coord_t x = 0; x < side; x++) {
+            const uint32_t sx = ((uint32_t)x * step) >> 16;
+            const uint32_t nx = (sx + 1u < src_side) ? sx + 1u : sx;
+            out[x]            = camera_avg4(r0[sx], r0[nx], r1[sx], r1[nx]);
+        }
+    }
+    return true;
 }
 
 void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
     if (!camera_img) return;
     ASSERT_OR_DIE(rgb565, "null rgb565");
     ASSERT_OR_DIE(w > 0 && h > 0, "invalid camera frame size");
+
+    camera_dsc.header.w      = (uint16_t)w;
+    camera_dsc.header.h      = (uint16_t)h;
+    camera_dsc.header.stride = (uint16_t)(w * 2);
+    camera_dsc.data_size     = w * h * 2;
+    camera_dsc.data          = rgb565;
+
+    if (camera_preview_square) {
+        // Scanning: show the largest centred square. Display only - the
+        // decoder still gets every captured pixel.
+        const lv_coord_t side = (camera_preview_h < camera_preview_w) ? ui_scale(camera_preview_h)
+                                                                      : ui_scale(camera_preview_w);
+        if (camera_square_build(rgb565, w, h, side)) {
+            // Widget exactly the image size, so LVGL blits with no transform.
+            camera_dsc.header.w      = (uint16_t)side;
+            camera_dsc.header.h      = (uint16_t)side;
+            camera_dsc.header.stride = (uint16_t)(side * 2);
+            camera_dsc.data_size     = (uint32_t)side * (uint32_t)side * 2u;
+            camera_dsc.data          = (const uint8_t*)camera_square_buf;
+            lv_obj_set_size(camera_img, side, side);
+            lv_image_set_src(camera_img, &camera_dsc);
+            lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_STRETCH);
+            return;
+        }
+
+        // Out of memory: let LVGL scale the frame itself, slower but correct.
+        lv_obj_set_size(camera_img, side, side);
+        lv_image_set_src(camera_img, &camera_dsc);
+        lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_COVER);
+        return;
+    }
 
     // Fit the frame into the scaled preview area, preserving aspect ratio
     uint32_t preview_w = (uint32_t)ui_scale(camera_preview_w);
@@ -825,12 +939,6 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
         disp_h      = (h * z) / 256;
     }
     lv_obj_set_size(camera_img, disp_w, disp_h);
-
-    camera_dsc.header.w      = (uint16_t)w;
-    camera_dsc.header.h      = (uint16_t)h;
-    camera_dsc.header.stride = (uint16_t)(w * 2);
-    camera_dsc.data_size     = w * h * 2;
-    camera_dsc.data          = rgb565;
 
     // Set the source first so the image has valid dimensions, then apply the
     // stretch alignment
@@ -931,8 +1039,9 @@ void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, title);
 
-    camera_preview_w = 300;
-    camera_preview_h = have_file_btn ? 160 : 200;
+    camera_preview_w      = 300;
+    camera_preview_h      = have_file_btn ? 160 : 200;
+    camera_preview_square = true; // scanning: show the frame's centre square only
 
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -966,6 +1075,7 @@ void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_
         ui_add_btn(s, "Open File", on_open_file, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
     }
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    add_camera_size_btn(s);
 
     ui_swap_screen(s);
 }
