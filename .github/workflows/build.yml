@@ -50,12 +50,35 @@ jobs:
       - name: Clone dependencies
         run: bash scripts/ensure_deps.sh
 
-      - name: Build firmware (ESP-IDF v5.5.5)
+      - name: Build firmware (ESP-IDF v5.5.5, TTGO T-Display)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.5
           target: esp32
           path: platform/esp32
+          command: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.ttgo_tdisplay" idf.py build
+
+      - name: Verify firmware exists
+        run: test -f platform/esp32/build/seedmix.bin
+
+  esp32s3:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Clone dependencies
+        run: bash scripts/ensure_deps.sh
+
+      - name: Build firmware (ESP-IDF v5.5.5, Waveshare ESP32-S3-Touch-LCD-3.5)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32s3
+          path: platform/esp32
+          command: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.waveshare_3_5" idf.py build
 
       - name: Verify firmware exists
         run: test -f platform/esp32/build/seedmix.bin

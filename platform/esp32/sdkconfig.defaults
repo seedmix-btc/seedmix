@@ -1,19 +1,34 @@
-# seedmix default configuration - TTGO T-Display (classic ESP32).
+# seedmix shared ESP32 configuration (board-independent settings).
 #
-# Board: 240x135 landscape ST7789 SPI display (Jade's TTGO T-Display settings),
-# no touchscreen, two physical buttons (GPIO 0 / GPIO 35), no camera, HW RNG.
-
-# -- Target / flash -----------------------------------------------------
-CONFIG_IDF_TARGET="esp32"
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# This file is NOT a complete configuration on its own: the target, flash size,
+# panel, pins and input devices live in a per-board overlay,
+# `sdkconfig.defaults.<board>`.  Both files must be combined, base first (a key
+# defined in the overlay overrides the base):
+#
+#     SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.ttgo_tdisplay"
+#     SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.waveshare_3_5"
+#
+# `scripts/build_esp32.sh` does that for you:
+#
+#     ./scripts/build_esp32.sh                      # ttgo_tdisplay (default)
+#     BOARD=waveshare_3_5 ./scripts/build_esp32.sh  # waveshare_3_5
+#
+# Note that `sdkconfig.defaults` is also ESP-IDF's fallback file name, so a bare
+# `idf.py build` picks up only these shared settings, which is not a usable
+# configuration: the flash size then stays at ESP-IDF's 2 MB default while the
+# hardened partition table needs 4 MB, so the build fails in the partition
+# size check. (ESP-IDF also auto-loads `sdkconfig.defaults.<IDF_TARGET>` right after
+# this file when one exists; this project deliberately uses board-named overlays
+# instead, since one target can host several boards.)
 
 # -- FreeRTOS ----------------------------------------------------------
+# LVGL's recursive grid/flex layout overflows the default 3584-byte stack.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # -- LVGL (vendored component, configured via its own Kconfig) ---------
+# On ESP-IDF, LVGL is configured through Kconfig, not main/lv_conf.h.
 CONFIG_LV_CONF_SKIP=y
 CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_MEM_SIZE_KILOBYTES=64
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
 CONFIG_LV_FONT_MONTSERRAT_10=y
@@ -25,55 +40,22 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
 
-# -- seedmix: display ---------------------------------------------------
-CONFIG_SEEDMIX_DISPLAY_RESOLUTION_240_135=y
-CONFIG_SEEDMIX_DISPLAY_DRIVER_ST7789=y
-CONFIG_SEEDMIX_DISPLAY_SPI_HOST=2
-CONFIG_SEEDMIX_DISPLAY_SPI_CLK_GPIO=18
-CONFIG_SEEDMIX_DISPLAY_SPI_MOSI_GPIO=19
-CONFIG_SEEDMIX_DISPLAY_SPI_CS_GPIO=5
-CONFIG_SEEDMIX_DISPLAY_SPI_DC_GPIO=16
-CONFIG_SEEDMIX_DISPLAY_RST_GPIO=23
-CONFIG_SEEDMIX_DISPLAY_BACKLIGHT_GPIO=4
-CONFIG_SEEDMIX_DISPLAY_OFFSET_X=40
-CONFIG_SEEDMIX_DISPLAY_OFFSET_Y=53
-CONFIG_SEEDMIX_DISPLAY_INVERT_COLORS=y
-CONFIG_SEEDMIX_DISPLAY_SWAP_XY=y
-CONFIG_SEEDMIX_DISPLAY_MIRROR_X=y
-CONFIG_SEEDMIX_DISPLAY_MIRROR_Y=n
-
-# -- seedmix: touchscreen ----------------------------------------------
-# TTGO T-Display has no touchscreen
-CONFIG_SEEDMIX_TOUCHSCREEN_ENABLE=n
-
-# -- seedmix: camera ----------------------------------------------------
-# TTGO T-Display has no camera
-CONFIG_SEEDMIX_CAMERA_ENABLE=n
-
-# -- seedmix: physical buttons -----------------------------------------
-CONFIG_SEEDMIX_BUTTONS_ENABLE=y
-CONFIG_SEEDMIX_BUTTONS_COUNT=2
-CONFIG_SEEDMIX_BUTTON_0_GPIO=0
-CONFIG_SEEDMIX_BUTTON_1_GPIO=35
-CONFIG_SEEDMIX_BUTTON_2_GPIO=-1
-CONFIG_SEEDMIX_BUTTON_3_GPIO=-1
-CONFIG_SEEDMIX_BUTTONS_ACTIVE_LOW=y
-CONFIG_SEEDMIX_BUTTONS_DEBOUNCE_MS=30
-
 # -- seedmix: entropy / TRNG -------------------------------------------
 # Hardware RNG
 CONFIG_SEEDMIX_TRNG_SOURCE_HARDWARE=y
 
 # -- hardening: no radio, no flash storage -----------------------------
-# No radio: build without the WiFi/Bluetooth/RF-PHY binary blobs
-# (APP_NO_BLOBS removes the closed-source radio libs, so the device cannot
-# transmit or receive wirelessly).  Enforced at build time in main_esp32.c.
+# Applies to every board.
+
+# No radio: build without the WiFi/Bluetooth/RF-PHY binary blobs, so the device
+# has no radio capability and cannot transmit or receive wirelessly.  The
+# compile-time #error in main_esp32.c fails the build if blobs get re-enabled.
 CONFIG_APP_NO_BLOBS=y
 CONFIG_BT_ENABLED=n
 
 # No flash storage: custom partition table with ONLY the factory app (no NVS,
-# no OTA, no PHY-init, no data partition).  PHY calibration storage in NVS is
-# also disabled.  The firmware must not persist secrets to flash.
+# no OTA, no PHY-init, no data partition), and PHY calibration storage in NVS
+# disabled. The firmware must not persist secrets to flash.
 CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_hardened.csv"
