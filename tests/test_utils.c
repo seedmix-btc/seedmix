@@ -42,44 +42,53 @@ static void test_floor_log2(void) {
 static void test_bytes_to_hex(void) {
     const uint8_t data[4] = {0xde, 0xad, 0xbe, 0xef};
     char          out[9]  = {0};
-    bytes_to_hex(data, sizeof(data), out, sizeof(out));
+    TEST_ASSERT_TRUE(bytes_to_hex(data, sizeof(data), out, sizeof(out)));
     TEST_ASSERT_EQUAL_STRING("deadbeef", out);
+
+    // failure cases
+    char small_out[4] = {0};
+    TEST_ASSERT_FALSE(bytes_to_hex(data, sizeof(data), small_out, sizeof(small_out)));
+    TEST_ASSERT_FALSE(bytes_to_hex(NULL, sizeof(data), out, sizeof(out)));
+    TEST_ASSERT_FALSE(bytes_to_hex(data, 0, out, sizeof(out)));
+    TEST_ASSERT_FALSE(bytes_to_hex(data, sizeof(data), NULL, sizeof(out)));
 }
 
 static void test_hex_to_bytes(void) {
     const char* hex    = "deadbeef";
     uint8_t     out[4] = {0};
-    hex_to_bytes(hex, (char*)out, sizeof(out));
+    TEST_ASSERT_TRUE(hex_to_bytes(hex, 8, out, sizeof(out)));
     const uint8_t expected[4] = {0xde, 0xad, 0xbe, 0xef};
     TEST_ASSERT_EQUAL_MEMORY(expected, out, sizeof(out));
     // Test with an empty string
     const char* empty_hex    = "";
     uint8_t     empty_out[1] = {0};
-    hex_to_bytes(empty_hex, (char*)empty_out, 0);
+    TEST_ASSERT_TRUE(hex_to_bytes(empty_hex, 0, empty_out, 0));
     TEST_ASSERT_EQUAL_MEMORY((uint8_t[]){0}, empty_out, sizeof(empty_out));
-    // Test with an odd-length string (should assert or fail)
+    // Test with an odd-length string
     const char* odd_hex    = "abc";
     uint8_t     odd_out[1] = {0};
-    TEST_ASSERT_FATAL(hex_to_bytes(odd_hex, (char*)odd_out, sizeof(odd_out)));
-    // Test with invalid length (output buffer too small)
+    TEST_ASSERT_FALSE(hex_to_bytes(odd_hex, 3, odd_out, sizeof(odd_out)));
+    // Test with an output buffer too small
     const char* valid_hex    = "abcd";
     uint8_t     small_out[1] = {0};
-    TEST_ASSERT_FATAL(hex_to_bytes(valid_hex, (char*)small_out, sizeof(small_out)));
-    // Test with invalid length (output buffer too large)
+    TEST_ASSERT_FALSE(hex_to_bytes(valid_hex, 4, small_out, sizeof(small_out)));
+    // Test with a large-enough output buffer
     const char* valid_hex2   = "abcd";
     uint8_t     large_out[4] = {0};
-    TEST_ASSERT_FATAL(hex_to_bytes(valid_hex2, (char*)large_out, sizeof(large_out)));
-    // Test with a NULL output buffer (should assert or fail)
+    TEST_ASSERT_TRUE(hex_to_bytes(valid_hex2, 4, large_out, sizeof(large_out)));
+    const uint8_t expected2[2] = {0xab, 0xcd};
+    TEST_ASSERT_EQUAL_MEMORY(expected2, large_out, 2);
+    // Test with a NULL output buffer
     const char* null_hex = "abcd";
-    TEST_ASSERT_FATAL(hex_to_bytes(null_hex, NULL, 2));
-    // Test with a NULL input string (should assert or fail)
+    TEST_ASSERT_FALSE(hex_to_bytes(null_hex, 4, NULL, 2));
+    // Test with a NULL input string
     const char* null_input  = NULL;
     uint8_t     null_out[1] = {0};
-    TEST_ASSERT_FATAL(hex_to_bytes(null_input, (char*)null_out, sizeof(null_out)));
+    TEST_ASSERT_FALSE(hex_to_bytes(null_input, 4, null_out, sizeof(null_out)));
     // Test with an invalid string
     const char* invalid_hex    = "ghij";
     uint8_t     invalid_out[2] = {0};
-    TEST_ASSERT_FATAL(hex_to_bytes(invalid_hex, (char*)invalid_out, sizeof(invalid_out)));
+    TEST_ASSERT_FALSE(hex_to_bytes(invalid_hex, 4, invalid_out, sizeof(invalid_out)));
 }
 
 static void test_sha256_expand_deterministic_and_prefix(void) {

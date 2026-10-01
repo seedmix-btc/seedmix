@@ -5,6 +5,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 
 # -- Find Dependencies --------------------------------------------------
 find_package(SDL2 REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # Build libwally from external/libwally-core (submodule)
 include(BuildLibWally)
@@ -22,12 +23,15 @@ if(NOT EXISTS ${LVGL_DIR}/lvgl.h)
         "Run:  git submodule update --init  or  clone into external/lvgl")
 endif()
 
-# Tell LVGL (v9.2.0) where lv_conf.h lives
-set(LV_CONF_PATH ${CMAKE_SOURCE_DIR}/main/lv_conf.h)
+# Tell LVGL (v9.5.0) where lv_conf.h lives
+if(NOT LV_BUILD_CONF_PATH)
+    set(LV_BUILD_CONF_PATH "${CMAKE_SOURCE_DIR}/main/lv_conf.h" CACHE PATH
+        "lv_conf.h used by the vendored LVGL" FORCE)
+endif()
 
-# Don't build examples/demos (they reference widgets we havve disabled)
-set(LV_CONF_BUILD_DISABLE_EXAMPLES ON CACHE BOOL "" FORCE)
-set(LV_CONF_BUILD_DISABLE_DEMOS    ON CACHE BOOL "" FORCE)
+# Don't build examples/demos (they reference widgets we have disabled)
+set(CONFIG_LV_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_BUILD_DEMOS    OFF CACHE BOOL "" FORCE)
 
 # Include LVGL (it provides its own CMakeLists.txt)
 add_subdirectory(${LVGL_DIR} ${CMAKE_BINARY_DIR}/lvgl)
@@ -40,6 +44,10 @@ add_executable(${PROJECT_NAME}
     ${COMMON_SOURCES}
     platform/linux/main_linux.c
     platform/linux/hal_linux.c
+    platform/linux/image_file.c
+    platform/linux/lvgl_gray.c
+    platform/linux/png_gray.c
+    platform/linux/gif_gray.c
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -56,6 +64,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_link_libraries(${PROJECT_NAME} PRIVATE
     lvgl
     SDL2::SDL2
+    ZLIB::ZLIB
     m
     pthread
 )

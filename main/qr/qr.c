@@ -12,8 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define QR_SIDE_MAX 512u
-#define QR_SIZE_MAX (QR_SIDE_MAX * QR_SIDE_MAX)
+#define QR_SIDE_MAX QR_DECODE_SIDE_MAX
+#define QR_SIZE_MAX QR_DECODE_PIXELS_MAX
 
 bool qr_encode(const uint8_t* data, size_t len, qr_mode_t mode, qr_grid_t* out) {
     if (!data || len == 0 || len > INT_MAX || !out) return false;

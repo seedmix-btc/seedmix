@@ -75,5 +75,19 @@ void hal_camera_frame_free(hal_camera_frame_t* frame) {
     memset(frame, 0, sizeof(*frame));
 }
 
+/* -- Image files ------------------------------------------------------ */
+/* QR codes come from the camera on this target: there is no file chooser, and
+ * hal_file_image_available() == false hides the UI for it. */
+bool hal_file_image_available(void) { return false; }
+
+void hal_file_image_pick(void) {}
+
+void hal_file_image_reset(void) {}
+
+hal_file_image_status_t hal_file_image_poll(hal_camera_frame_t* out) {
+    (void)out;
+    return HAL_FILE_IMAGE_NONE;
+}
+
 /* -- Touch / pointer input ------------------------------------------- */
 bool hal_touch_available(void) { return false; }

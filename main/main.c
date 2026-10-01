@@ -5,10 +5,14 @@
 
 #include "app.h"
 #include "crypto/coin.h"
+#include "crypto/descriptor.h"
 #include "crypto/dice.h"
 #include "crypto/mnemonic.h"
 #include "crypto/seedqr.h"
 #include "crypto/touch.h"
+#include "crypto/txinspect.h"
+#include "crypto/ur_descriptor.h"
+#include "crypto/ur_psbt.h"
 #include "hal.h"
 #include "lvgl.h"
 #include "qr/qr.h"
@@ -29,13 +33,37 @@ static unsigned    word_count  = 12;
 static qr_grid_t   exported_qr = {0};
 
 /* -- Forward declarations --------------------------------------------- */
+/* Where a decoded QR payload came from.  The camera keeps streaming, so a
+ * payload the screen cannot use is quietly passed over; a file is read once,
+ * so the screen says so instead. */
+typedef enum {
+    QR_SOURCE_CAMERA = 0,
+    QR_SOURCE_FILE,
+} qr_source_t;
+
 static void on_other_source(void);
 static void on_camera_image(void);
 static void on_camera_use(void);
 static void on_camera_cancel(void);
 static void on_scan_qr(void);
-static void on_qr_scan(void);
+static void on_scan_file(void);
+static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen);
 static void on_qr_scan_cancel(void);
+static bool qr_scan_deliver(qr_source_t source, const uint8_t* payload, size_t plen);
+static void qr_scan_poll_file(void);
+static void qr_scan_error(const char* msg);
+static void qr_scan_screen_show(void);
+static void on_inspect_tx(lv_event_t* e);
+static bool on_tx_payload(qr_source_t source, const uint8_t* payload, size_t plen);
+static bool on_descriptor_payload(qr_source_t source, const uint8_t* payload, size_t plen);
+static void on_inspect_tx_cancel(void);
+static void on_inspect_tx_done(void);
+static void on_descriptor_cancel(void);
+static void on_scan_descriptor(void);
+static void on_skip_descriptor(void);
+static void on_descriptor_overview_continue(void);
+static void on_descriptor_overview_cancel(void);
+static void start_tx_scan(void);
 static void on_export_seedqr(void);
 static void on_export_done(void);
 static void on_dice_rolls(void);
@@ -53,8 +81,9 @@ static void on_we_error_cancel(void);
 static void on_we_error_retry(void);
 static void on_we_error_choose(void);
 static void on_we_word_selected(const char* word);
-static void on_new_wallet(lv_event_t* e);
+static void on_create_mnemonic(lv_event_t* e);
 static void on_test_error(lv_event_t* e);
+static void show_main_screen(void);
 
 static void on_generating_msg(const char* msg) {
     ui_show_msg(msg);
@@ -121,10 +150,10 @@ static void show_merge_screen(mnemonic_t* new_m, const char* source_desc) {
 
     mnemonic_t* preview = mnemonic_from_entropy(ma, elen);
 
-    char ca_hex[65], na_hex[65], ma_hex[65];
-    bytes_to_hex(ca, elen, ca_hex, sizeof(ca_hex));
-    bytes_to_hex(na, elen, na_hex, sizeof(na_hex));
-    bytes_to_hex(ma, elen, ma_hex, sizeof(ma_hex));
+    char ca_hex[2 * 32 + 1], na_hex[2 * 32 + 1], ma_hex[2 * 32 + 1];
+    ASSERT_OR_DIE(bytes_to_hex(ca, elen, ca_hex, sizeof(ca_hex)), "merge hex buffer too small");
+    ASSERT_OR_DIE(bytes_to_hex(na, elen, na_hex, sizeof(na_hex)), "merge hex buffer too small");
+    ASSERT_OR_DIE(bytes_to_hex(ma, elen, ma_hex, sizeof(ma_hex)), "merge hex buffer too small");
 
     secure_memzero(ma, sizeof(ma));
     secure_memzero(na, sizeof(na));
@@ -165,6 +194,48 @@ static hal_camera_frame_t camera_frame;  /* latest captured frame (owned) */
 static uint8_t*           camera_rgb565; /* RGB565 preview buffer (owned, reused) */
 static uint32_t           camera_w = 0, camera_h = 0;
 static lv_timer_t*        camera_timer = NULL; /* live feed timer */
+
+static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_t* gray);
+
+/* Continuous QR scanning: the live feed auto-decodes and dispatches payloads.
+ * The callback returns true when the payload belongs to the screen being
+ * scanned (or is a usable part of one), which is how a file holding an
+ * unrelated QR code is told apart from one that is simply being waited on. */
+typedef bool (*qr_payload_cb_t)(qr_source_t source, const uint8_t* payload, size_t plen);
+static qr_payload_cb_t qr_scan_cb       = NULL;
+static unsigned        qr_scan_tick     = 0;
+static uint8_t*        qr_scan_last     = NULL; /* last decoded payload (dedup) */
+static size_t          qr_scan_last_len = 0;
+static uint8_t*        qr_gray_buf      = NULL; /* reusable grayscale buffer */
+static size_t          qr_gray_len      = 0;
+static uint8_t*        qr_payload_buf   = NULL; /* reusable decode buffer */
+
+/* The scan screen that is running, so an error message can bring it back. */
+static const char* qr_scan_title  = NULL;
+static ui_cb_t     qr_scan_cancel = NULL;
+static bool        qr_scan_paused = false; /* an error message owns the screen */
+
+static void qr_scan_stop(void) {
+    qr_scan_cb     = NULL;
+    qr_scan_tick   = 0;
+    qr_scan_title  = NULL;
+    qr_scan_cancel = NULL;
+    qr_scan_paused = false;
+    if (qr_scan_last) {
+        free(qr_scan_last);
+        qr_scan_last     = NULL;
+        qr_scan_last_len = 0;
+    }
+    if (qr_gray_buf) {
+        free(qr_gray_buf);
+        qr_gray_buf = NULL;
+        qr_gray_len = 0;
+    }
+    if (qr_payload_buf) {
+        free(qr_payload_buf);
+        qr_payload_buf = NULL;
+    }
+}
 
 static inline uint8_t clip8(int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
 
@@ -270,8 +341,35 @@ static const char* camera_pixfmt_name(hal_camera_pixfmt_t f) {
     }
 }
 
+/* Hand a decoded payload to the active scan callback.  The camera sees the same
+ * QR code in every frame, so a repeat of the last payload is dropped - a file
+ * playing an animation repeats frames the same way.  Returns whether the
+ * payload belonged to the screen being scanned. */
+static bool qr_scan_deliver(qr_source_t source, const uint8_t* payload, size_t plen) {
+    bool dup = qr_scan_last && qr_scan_last_len == plen && memcmp(qr_scan_last, payload, plen) == 0;
+    if (dup) return true; /* already handed over; not worth reporting twice */
+
+    free(qr_scan_last);
+    qr_scan_last = malloc(plen ? plen : 1);
+    ASSERT_OR_DIE(qr_scan_last, "out of memory");
+    memcpy(qr_scan_last, payload, plen);
+    qr_scan_last_len = plen;
+
+    /* The callback may well stop the scan (and with it this buffer), so nothing
+     * here is touched after it. */
+    return qr_scan_cb(source, payload, plen);
+}
+
 static void camera_feed_tick(lv_timer_t* t) {
     (void)t;
+
+    /* An error message owns the screen for a moment: the widgets this feed
+     * draws into went with the screen it replaced. */
+    if (qr_scan_paused) return;
+
+    /* An image file picked while a scan is running arrives through this timer
+     * too (only the browser defers the pick, the desktop decodes it in place). */
+    qr_scan_poll_file();
 
     hal_camera_frame_t next;
     memset(&next, 0, sizeof(next));
@@ -305,9 +403,36 @@ static void camera_feed_tick(lv_timer_t* t) {
 
     camera_frame_to_rgb565(&camera_frame, camera_rgb565);
     ui_camera_feed_update(camera_rgb565, camera_w, camera_h);
+
+    if (qr_scan_cb && (++qr_scan_tick % 3u) == 0) {
+        /* Throttled continuous decode: scan every 3rd frame (~360 ms). */
+        size_t need = (size_t)camera_w * camera_h;
+        if (!qr_gray_buf || qr_gray_len < need) {
+            free(qr_gray_buf);
+            qr_gray_buf = malloc(need);
+            ASSERT_OR_DIE(qr_gray_buf, "out of memory");
+            qr_gray_len = need;
+        }
+        if (!qr_payload_buf) {
+            qr_payload_buf = malloc(TXINSPECT_MAX_PAYLOAD);
+            ASSERT_OR_DIE(qr_payload_buf, "out of memory");
+        }
+
+        rgb565_to_gray(camera_rgb565, camera_w, camera_h, qr_gray_buf);
+        size_t plen = 0;
+        if (qr_decode(qr_gray_buf, camera_w, camera_h, qr_payload_buf, TXINSPECT_MAX_PAYLOAD,
+                      &plen)) {
+            /* A frame that is not for this screen is passed over silently: the
+             * next one arrives in a moment. */
+            (void)qr_scan_deliver(QR_SOURCE_CAMERA, qr_payload_buf, plen);
+        }
+    }
 }
 
 static void camera_feed_stop(void) {
+    /* A picked file may still be playing frames into the scan. */
+    hal_file_image_reset();
+    qr_scan_stop();
     if (camera_timer) {
         lv_timer_delete(camera_timer);
         camera_timer = NULL;
@@ -378,13 +503,56 @@ static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_
     }
 }
 
+/* -- Scan screen errors ------------------------------------------------ */
+/* How long an error stays on screen before scanning carries on. */
+#define QR_SCAN_ERROR_MS 500u
+
+/* Show the scan screen of the running scan. */
+static void qr_scan_screen_show(void) {
+    ui_show_qr_scan_auto(qr_scan_cancel, qr_scan_title, on_scan_file);
+
+    /* The camera keeps streaming while a message is up, so the new screen
+     * starts from the last frame instead of an empty box. */
+    if (camera_rgb565 && camera_w && camera_h) {
+        ui_camera_feed_update(camera_rgb565, camera_w, camera_h);
+    }
+}
+
+/*
+ * A payload the screen cannot use - or a file holding no readable QR code at
+ * all - is worth more than a line of small print: the message takes over the
+ * screen for a moment and the scan then carries on where it left off.  The
+ * camera session, the multi-part UR decoder and the feed timer all stay as they
+ * are; the timer only skips its work while the message is up, because the
+ * widgets it draws into belong to the screen that was replaced.
+ */
+static void qr_scan_error(const char* msg) {
+    ASSERT_OR_DIE(msg, "null message");
+    ASSERT_OR_DIE(qr_scan_cb, "no active scan");
+
+    /* Whatever came out of the file is not for this screen: drop the pick, so
+     * a looping animation does not raise the same message over and over. */
+    hal_file_image_reset();
+
+    qr_scan_paused = true;
+    ui_show_msg(msg);
+    ui_delay_ms(QR_SCAN_ERROR_MS);
+    qr_scan_paused = false;
+
+    if (!qr_scan_cb) return; /* the scan ended while the message was up */
+    qr_scan_screen_show();
+}
+
 static void on_scan_qr(void) {
     if (!hal_camera_available()) {
         FATAL("Camera not available.");
     }
     camera = hal_camera_open();
     ASSERT_OR_DIE(camera, "Failed to open camera.");
-    ui_show_qr_scan(on_qr_scan, on_qr_scan_cancel);
+    qr_scan_cb     = on_seedqr_payload;
+    qr_scan_title  = "Scan SeedQR";
+    qr_scan_cancel = on_qr_scan_cancel;
+    qr_scan_screen_show();
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
 }
 
@@ -394,55 +562,385 @@ static void on_qr_scan_cancel(void) {
                          go_source);
 }
 
-static void on_qr_scan(void) {
-    if (camera_timer) {
-        lv_timer_delete(camera_timer);
-        camera_timer = NULL;
-    }
-    if (camera) {
-        hal_camera_close(camera);
-        camera = NULL;
-    }
-    if (!camera_rgb565 || camera_w == 0 || camera_h == 0) {
-        camera_release();
-        FATAL("No camera image captured yet.");
-    }
+static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    mnemonic_t* m = NULL;
 
-    uint8_t* gray = malloc((size_t)camera_w * camera_h);
-    ASSERT_OR_DIE(gray, "out of memory");
-    rgb565_to_gray(camera_rgb565, camera_w, camera_h, gray);
-
-    uint8_t     payload[256];
-    size_t      plen = 0;
-    mnemonic_t* m    = NULL;
-
-    if (qr_decode(gray, camera_w, camera_h, payload, sizeof(payload), &plen)) {
-        if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
-            char digits[SEEDQR_STANDARD_24_DIGITS + 1];
-            memcpy(digits, payload, plen);
-            digits[plen] = '\0';
-            m            = seedqr_standard_decode(digits);
-        } else if (plen == 16 || plen == 32) {
-            m = seedqr_compact_decode(payload, plen);
-        }
+    if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
+        char digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        memcpy(digits, payload, plen);
+        digits[plen] = '\0';
+        m            = seedqr_standard_decode(digits);
+        secure_memzero(digits, sizeof(digits));
+    } else if (plen == 16 || plen == 32) {
+        m = seedqr_compact_decode(payload, plen);
     }
-
-    secure_memzero(gray, (size_t)camera_w * camera_h);
-    free(gray);
-    camera_release();
 
     if (!m) {
-        ui_show_msg("No valid SeedQR found");
-        ui_delay_ms(1500);
-        on_qr_scan_cancel();
-        return;
+        /* From the camera this means "keep looking"; a picked file has no next
+         * frame to look at, so say what was wrong with it. */
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a SeedQR code");
+        return false; /* not a SeedQR */
     }
+
+    camera_feed_stop();
 
     unsigned wc = (mnemonic_entropy_size(m) == 32) ? 24 : 12;
     char     desc[48];
     int      res = snprintf(desc, sizeof(desc), "scanned %u-word SeedQR", wc);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_ENTERED, desc);
+    return true;
+}
+
+/* -- Scanning a QR code from an image file ---------------------------- */
+/*
+ * The desktop and browser builds can load a QR code from an image file (a
+ * screenshot exported by another wallet, a photo of a printed SeedQR, ...)
+ * instead of pointing the camera at it.  The platform decodes the picked file
+ * and hands back grayscale frames, which then take the very same
+ * decode/dispatch path as a camera frame.  An animated GIF arrives one frame at
+ * a time, so an animated multi-part UR collects its parts just as it would from
+ * the camera.
+ */
+static void on_scan_file(void) {
+    if (!qr_scan_cb) return;
+
+    /* Drop the previous message: the picker is about to report something. */
+    ui_qr_scan_progress(0, 0);
+    hal_file_image_pick();
+}
+
+static void qr_scan_poll_file(void) {
+    if (!qr_scan_cb) return; /* only the scan screens offer a file pick */
+
+    hal_camera_frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+
+    switch (hal_file_image_poll(&frame)) {
+    case HAL_FILE_IMAGE_NONE:
+        return; /* nothing picked yet, or the picker was cancelled */
+    case HAL_FILE_IMAGE_FAILED:
+        qr_scan_error("Could not read an image file");
+        return;
+    case HAL_FILE_IMAGE_READY:
+        break;
+    }
+
+    if (frame.pixfmt != HAL_CAMERA_FMT_GRAY8 || !frame.data) {
+        hal_camera_frame_free(&frame);
+        qr_scan_error("Could not read an image file");
+        return;
+    }
+
+    if (!qr_payload_buf) {
+        qr_payload_buf = malloc(TXINSPECT_MAX_PAYLOAD);
+        ASSERT_OR_DIE(qr_payload_buf, "out of memory");
+    }
+
+    size_t plen = 0;
+    if (qr_decode(frame.data, frame.width, frame.height, qr_payload_buf, TXINSPECT_MAX_PAYLOAD,
+                  &plen)) {
+        LOG_INFO("QR image file decoded: %ux%u", (unsigned)frame.width, (unsigned)frame.height);
+        /* A payload this screen cannot use is reported by its own callback:
+         * unlike a camera frame, there is no next frame to wait for. */
+        (void)qr_scan_deliver(QR_SOURCE_FILE, qr_payload_buf, plen);
+    } else {
+        qr_scan_error("No QR code found in that image");
+    }
+
+    hal_camera_frame_free(&frame);
+}
+
+/* -- Inspect transaction/PSBT ---------------------------------------- */
+static tx_inspect_t*      inspected   = NULL;
+static ur_psbt_decoder_t* ur_decoder  = NULL;
+static descriptor_t*      wallet_desc = NULL;
+
+/* Network the scanned payload is interpreted as.  A transaction does not say
+ * which network it belongs to: the same output script is spendable on mainnet
+ * and on testnet alike, and only the address encoding differs.  The user picks
+ * it before scanning, and it decides how addresses are rendered.  The order
+ * must match tx_inspect_network_t. */
+static const char* const TX_NETWORKS[] = {"Mainnet", "Testnet", "Signet", "Regtest"};
+#define TX_NETWORK_COUNT (sizeof(TX_NETWORKS) / sizeof(TX_NETWORKS[0]))
+
+static tx_inspect_network_t tx_network = TX_INSPECT_NETWORK_MAINNET;
+
+static void ur_decoder_reset(void) {
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = ur_psbt_decoder_new();
+}
+
+/* Descriptor UR decoder: lives only while the descriptor QR is being scanned
+ * (it accumulates the animated multi-part fragments of a large descriptor). */
+static ur_descriptor_decoder_t* desc_decoder = NULL;
+
+static void desc_decoder_reset(void) {
+    ur_descriptor_decoder_free(desc_decoder);
+    desc_decoder = ur_descriptor_decoder_new();
+}
+
+static void desc_decoder_stop(void) {
+    ur_descriptor_decoder_free(desc_decoder);
+    desc_decoder = NULL;
+}
+
+/* Classify an output address against the scanned wallet descriptor (if any). */
+static tx_output_kind_t classify_output(void* ctx, size_t out_index, const char* address) {
+    (void)out_index;
+    descriptor_t* d = ctx;
+    if (!d) return TX_OUTPUT_NONE;
+    switch (descriptor_classify(d, address)) {
+    case DESCRIPTOR_MATCH_CHANGE:
+        return TX_OUTPUT_CHANGE;
+    case DESCRIPTOR_MATCH_RECEIVE:
+        return TX_OUTPUT_RECEIVE;
+    case DESCRIPTOR_MATCH_NONE:
+        return TX_OUTPUT_NONE;
+    }
+    return TX_OUTPUT_NONE;
+}
+
+static void show_inspected_tx(void) {
+    /* The network is chosen before scanning; apply it now so addresses are
+     * rendered for it. */
+    tx_inspect_set_network(inspected, tx_network);
+
+    char* body = malloc(TXINSPECT_RENDER_MAX);
+    ASSERT_OR_DIE(body, "out of memory");
+    tx_inspect_render_ex(inspected, body, TXINSPECT_RENDER_MAX, classify_output, wallet_desc);
+
+    char* warning = malloc(TXINSPECT_WARNING_MAX);
+    ASSERT_OR_DIE(warning, "out of memory");
+    bool warn = tx_inspect_nonce_warning(inspected, warning, TXINSPECT_WARNING_MAX);
+
+    /* Repeat the network in the title: the address lines themselves give no
+     * hint of which network they were encoded for. */
+    char title[64];
+    int  res = snprintf(title, sizeof(title), "%s (%s)", tx_inspect_kind_name(inspected),
+                       tx_inspect_network_name(tx_inspect_network(inspected)));
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(title), "title too long");
+
+    ui_show_tx_inspect(title, body, warn ? warning : NULL, on_inspect_tx_done);
+
+    // The UI has copied the strings it needs; scrub and release the buffers.
+    secure_memzero(warning, TXINSPECT_WARNING_MAX);
+    free(warning);
+    secure_memzero(body, TXINSPECT_RENDER_MAX);
+    free(body);
+}
+
+/* Ask whether to scan a wallet descriptor first, so change outputs can be
+ * flagged on the transaction summary. */
+static void ask_descriptor_or_scan(void) {
+    ui_show_confirm("Scan Transaction/PSBT",
+                    "Scan a wallet descriptor first?\n\nA descriptor lets you "
+                    "verify which outputs are your change.",
+                    "Scan descriptor", "Just scan", on_scan_descriptor, on_skip_descriptor);
+}
+
+static void on_network_chosen(uint8_t index) {
+    tx_network =
+        index < TX_NETWORK_COUNT ? (tx_inspect_network_t)index : TX_INSPECT_NETWORK_MAINNET;
+    ask_descriptor_or_scan();
+}
+
+static void on_inspect_tx(lv_event_t* e) {
+    (void)e;
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    ui_show_choice("Transaction Network", "Which network is this transaction for?", TX_NETWORKS,
+                   TX_NETWORK_COUNT, on_network_chosen, show_main_screen);
+}
+
+static void on_skip_descriptor(void) { start_tx_scan(); }
+
+static void on_scan_descriptor(void) {
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb     = on_descriptor_payload;
+    qr_scan_title  = "Scan Wallet Descriptor";
+    qr_scan_cancel = on_descriptor_cancel;
+    desc_decoder_reset();
+    qr_scan_screen_show();
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_descriptor_cancel(void) {
+    camera_feed_stop();
+    desc_decoder_stop();
+    on_inspect_tx(NULL);
+}
+
+/* Show what was scanned before the descriptor is used: the scan only proves
+ * the text parses, not that it is the wallet the user meant to load. */
+static void show_descriptor_overview(void) {
+    char* body = malloc(DESCRIPTOR_OVERVIEW_MAX);
+    ASSERT_OR_DIE(body, "out of memory");
+
+    size_t len = descriptor_overview(wallet_desc, body, DESCRIPTOR_OVERVIEW_MAX);
+    if (len == 0) {
+        /* Nothing to review (should not happen for a parsed descriptor):
+         * carry on rather than block the scan. */
+        free(body);
+        start_tx_scan();
+        return;
+    }
+
+    ui_show_descriptor_overview("Wallet Descriptor", body, on_descriptor_overview_continue,
+                                on_descriptor_overview_cancel);
+
+    // The UI has copied the text it needs; scrub and release the buffer.
+    secure_memzero(body, DESCRIPTOR_OVERVIEW_MAX);
+    free(body);
+}
+
+static void on_descriptor_overview_continue(void) { start_tx_scan(); }
+
+static void on_descriptor_overview_cancel(void) {
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    on_inspect_tx(NULL);
+}
+
+static bool descriptor_accept(descriptor_status_t st, descriptor_t* d, qr_source_t source) {
+    if (!d) {
+        if (st == DESCRIPTOR_ERR_TOO_LONG) {
+            camera_feed_stop();
+            desc_decoder_stop();
+            ui_show_msg("Descriptor is too long to scan.");
+            ui_delay_ms(2000);
+            on_inspect_tx(NULL);
+            return true;
+        }
+
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a wallet descriptor");
+        return false; /* not a descriptor (or an unsupported one) */
+    }
+
+    camera_feed_stop();
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = d;
+    show_descriptor_overview();
+    return true;
+}
+
+static bool on_descriptor_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    /* UR-encoded descriptor: single-part or animated multi-part
+     * ur:output-descriptor / ur:crypto-output. */
+    if (plen >= 3 && (payload[0] == 'u' || payload[0] == 'U') &&
+        (payload[1] == 'r' || payload[1] == 'R') && payload[2] == ':') {
+        if (!desc_decoder) desc_decoder = ur_descriptor_decoder_new();
+
+        char* text = NULL;
+        int   r    = ur_descriptor_decoder_receive(desc_decoder, (const char*)payload, plen, &text);
+        if (r == 0) { /* a part; the rest of the descriptor is still to come */
+            ui_qr_scan_progress(ur_descriptor_decoder_received(desc_decoder),
+                                ur_descriptor_decoder_expected(desc_decoder));
+            return true;
+        }
+        if (r == 1) {
+            descriptor_status_t st = DESCRIPTOR_ERR_NOT_DESC;
+            descriptor_t*       d  = descriptor_parse((const uint8_t*)text, strlen(text), &st);
+            secure_memzero(text, strlen(text));
+            free(text);
+            return descriptor_accept(st, d, source);
+        }
+
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a wallet descriptor");
+        return false; /* not a descriptor UR part */
+    }
+
+    descriptor_status_t st = DESCRIPTOR_ERR_NOT_DESC;
+    descriptor_t*       d  = descriptor_parse(payload, plen, &st);
+    return descriptor_accept(st, d, source);
+}
+
+static void start_tx_scan(void) {
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    ur_decoder_reset();
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb     = on_tx_payload;
+    qr_scan_title  = "Scan Transaction/PSBT";
+    qr_scan_cancel = on_inspect_tx_cancel;
+    qr_scan_screen_show();
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_inspect_tx_cancel(void) {
+    camera_feed_stop();
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = NULL;
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    show_main_screen();
+}
+
+static void on_inspect_tx_done(void) {
+    tx_inspect_free(inspected);
+    inspected = NULL;
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = NULL;
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    show_main_screen();
+}
+
+static bool on_tx_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    /* UR-encoded PSBT: single-part or animated multi-part (fountain). */
+    if (plen >= 3 && (payload[0] == 'u' || payload[0] == 'U') &&
+        (payload[1] == 'r' || payload[1] == 'R') && payload[2] == ':') {
+        if (!ur_decoder) ur_decoder = ur_psbt_decoder_new();
+
+        uint8_t* psbt     = NULL;
+        size_t   psbt_len = 0;
+        int r = ur_psbt_decoder_receive(ur_decoder, (const char*)payload, plen, &psbt, &psbt_len);
+
+        if (r == 1) {
+            inspected = tx_inspect_parse(psbt, psbt_len);
+            secure_memzero(psbt, psbt_len);
+            free(psbt);
+            camera_feed_stop();
+            if (!inspected) {
+                ui_show_msg("Not a valid PSBT");
+                ui_delay_ms(1500);
+                on_inspect_tx_cancel();
+                return true; /* the user was told why */
+            }
+            show_inspected_tx();
+            return true;
+        }
+        if (r == 0) { /* a part; the rest of the PSBT is still to come */
+            ui_qr_scan_progress(ur_psbt_decoder_received(ur_decoder),
+                                ur_psbt_decoder_expected(ur_decoder));
+            return true;
+        }
+
+        /* r == -1: not a valid PSBT UR part. */
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a transaction or PSBT");
+        return false;
+    }
+
+    /* Raw transaction / PSBT (hex or base64). */
+    inspected = tx_inspect_parse(payload, plen);
+    if (!inspected) {
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a transaction or PSBT");
+        return false;
+    }
+
+    camera_feed_stop();
+    show_inspected_tx();
+    return true;
 }
 
 static void on_export_seedqr(void) {
@@ -787,8 +1285,8 @@ static void on_finish(void) {
     ui_log_add("finished");
 }
 
-/* -- Entry: "New Wallet" button --------------------------------------- */
-static void on_new_wallet(lv_event_t* e) {
+/* -- Entry: "Create Mnemonic Seed" button --------------------------------------- */
+static void on_create_mnemonic(lv_event_t* e) {
     (void)e;
     ASSERT_OR_DIE(!current, "current mnemonic should be NULL");
     ASSERT_OR_DIE(!we_handle, "word entry handle should be NULL");
@@ -802,7 +1300,9 @@ static void on_test_error(lv_event_t* e) {
 }
 
 /* -- Initialization --------------------------------------------------- */
-static void show_main_screen(void) { ui_show_main(on_new_wallet, on_test_error); }
+static void show_main_screen(void) {
+    ui_show_main(on_create_mnemonic, on_inspect_tx, on_test_error);
+}
 
 void app_init(void) {
     lv_display_t* disp = lv_display_get_default();
