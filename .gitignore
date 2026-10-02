@@ -5,11 +5,16 @@ external/
 build*/
 sdkconfig
 sdkconfig.old
+# Board stamp written by scripts/build_esp32.sh
+.sdkconfig.board
 managed_components/
 *.o
 *.a
 *.elf
 *.bin
+
+# Committed SeedQR test vectors (binary payloads, see tests/vectors/seedqr/raw/)
+!tests/vectors/seedqr/raw/*.compact.bin
 
 # IDE
 .vscode/

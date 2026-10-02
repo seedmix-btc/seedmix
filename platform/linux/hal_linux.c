@@ -4,15 +4,24 @@
  *
  * Random source is /dev/urandom.  Camera entropy is captured from a
  * Video4Linux2 device (default /dev/video0, override with HAL_CAMERA_DEV).
+ * QR codes can also be read from an image file, picked with the desktop's file
+ * chooser (zenity/kdialog).  PNG and GIF are decoded by decoders of their own
+ * (png_gray.c, gif_gray.c), JPEG and BMP by LVGL (lvgl_gray.c).
  */
 
+#include "gif_gray.h"
 #include "hal.h"
+#include "lvgl.h"
+#include "lvgl_gray.h"
+#include "png_gray.h"
+#include "qr.h"
 #include "util/error.h"
 #include "util/log.h"
 #include "util/utils.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/videodev2.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,6 +291,281 @@ void hal_camera_frame_free(hal_camera_frame_t* frame) {
         free(frame->data);
     }
     memset(frame, 0, sizeof(*frame));
+}
+
+/* -- Image files (QR screenshots) ------------------------------------- */
+/*
+ * A QR code can also be loaded from a file (a screenshot exported by another
+ * wallet, a photo of a printed SeedQR, ...) instead of from the camera.  SDL2
+ * has no file chooser, so the picker is one of the desktop dialogs - zenity on
+ * GTK systems, kdialog on KDE ones.  When neither is installed the "Open File"
+ * button is hidden (hal_file_image_available() returns false).
+ *
+ * The picked file is decoded into the grayscale frame the QR decoder expects:
+ * PNG by png_gray.c, JPEG and BMP by LVGL's bundled decoders, and GIF by
+ * gif_gray.c.  LVGL sees paths as "<drive>:<path>", hence the
+ * LV_FS_POSIX_LETTER prefix below.  A still image is one frame; an animated
+ * GIF is a stream of frames (see the GIF section further down).
+ */
+
+typedef enum {
+    PICKER_UNKNOWN = -1, /* not probed yet */
+    PICKER_NONE    = 0,
+    PICKER_ZENITY,
+    PICKER_KDIALOG,
+} picker_t;
+
+static picker_t           s_picker = PICKER_UNKNOWN;
+static hal_camera_frame_t s_picked; /* frame decoded from a picked file */
+static bool               s_picked_ready = false;
+static bool               s_pick_failed  = false;
+
+/* Animated GIF handed out frame by frame (see the GIF section below). */
+static gif_gray_t* s_gif;
+static uint32_t    s_gif_w, s_gif_h;  /* logical screen size (frame size) */
+static uint32_t    s_gif_due_ms;      /* tick the next frame is handed out at */
+static unsigned    s_gif_pass_frames; /* frames decoded since the last rewind */
+
+static void gif_state_reset(void) {
+    gif_gray_close(s_gif);
+    s_gif             = NULL;
+    s_gif_due_ms      = 0;
+    s_gif_pass_frames = 0;
+}
+
+static bool program_installed(const char* name) {
+    char cmd[64];
+    int  res = snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", name);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(cmd), "picker command too long");
+    return system(cmd) == 0;
+}
+
+static picker_t picker(void) {
+    if (s_picker == PICKER_UNKNOWN) {
+        if (program_installed("zenity")) {
+            s_picker = PICKER_ZENITY;
+        } else if (program_installed("kdialog")) {
+            s_picker = PICKER_KDIALOG;
+        } else {
+            s_picker = PICKER_NONE;
+        }
+    }
+    return s_picker;
+}
+
+bool hal_file_image_available(void) { return picker() != PICKER_NONE; }
+
+/* Run the file chooser; returns false when it was cancelled or is unavailable. */
+static bool pick_image_path(char* out, size_t out_len) {
+    const char* cmd = (picker() == PICKER_ZENITY)
+                          ? "zenity --file-selection --title='Open QR image' "
+                            "--file-filter='Images | *.png *.jpg *.jpeg *.bmp *.gif'"
+                          : "kdialog --title 'Open QR image' --getopenfilename . "
+                            "'Images (*.png *.jpg *.jpeg *.bmp *.gif)'";
+
+    FILE* pipe = popen(cmd, "r");
+    if (!pipe) return false;
+
+    char  line[PATH_MAX];
+    char* got = fgets(line, sizeof(line), pipe);
+    int   rc  = pclose(pipe); /* non-zero when the dialog was cancelled */
+    if (!got || rc != 0) return false;
+
+    size_t n = strlen(line);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+        line[--n] = '\0';
+    }
+    if (n == 0 || n >= out_len) return false;
+    memcpy(out, line, n + 1);
+    return true;
+}
+
+/* Shrink an image that is larger than what qr_decode() accepts, averaging
+ * factor x factor blocks (a plain subsample could drop QR modules). */
+static bool fit_gray_size(uint8_t** gray, uint32_t* w, uint32_t* h) {
+    if (*w <= QR_DECODE_SIDE_MAX && *h <= QR_DECODE_SIDE_MAX) return true;
+
+    uint32_t fx = (*w + QR_DECODE_SIDE_MAX - 1) / QR_DECODE_SIDE_MAX;
+    uint32_t fy = (*h + QR_DECODE_SIDE_MAX - 1) / QR_DECODE_SIDE_MAX;
+    uint32_t f  = fx > fy ? fx : fy;
+
+    uint32_t dw = (*w + f - 1) / f;
+    uint32_t dh = (*h + f - 1) / f;
+
+    uint8_t* small = malloc((size_t)dw * dh);
+    if (!small) return false;
+
+    for (uint32_t y = 0; y < dh; y++) {
+        for (uint32_t x = 0; x < dw; x++) {
+            uint32_t sum = 0, n = 0;
+            for (uint32_t sy = y * f; sy < (y + 1) * f && sy < *h; sy++) {
+                const uint8_t* row = *gray + (size_t)sy * *w;
+                for (uint32_t sx = x * f; sx < (x + 1) * f && sx < *w; sx++) {
+                    sum += row[sx];
+                    n++;
+                }
+            }
+            small[(size_t)y * dw + x] = (uint8_t)(sum / n);
+        }
+    }
+
+    free(*gray);
+    *gray = small;
+    *w    = dw;
+    *h    = dh;
+    return true;
+}
+
+/* Decode a still image (PNG, JPEG, BMP) into a grayscale frame, or NULL on
+ * failure.  Animated GIFs are the one format that is not a single frame and go
+ * through gif_poll() instead. */
+static hal_camera_frame_t* decode_image_file(const char* path) {
+    uint32_t w = 0, h = 0;
+
+    /* PNG is decoded by our own decoder: LVGL's would have to hold the whole
+     * image in LVGL's fixed memory pool (LV_MEM_SIZE, sized for widget
+     * objects).  JPEG and BMP go through LVGL (see lvgl_gray.c), whose
+     * decoders work in small blocks.  Both return an image that fits
+     * qr_decode(). */
+    uint8_t* gray = png_decode_gray_file(path, &w, &h);
+    if (!gray) gray = lvgl_gray_decode_file(path, &w, &h);
+
+    if (!gray) {
+        LOG_WARN("cannot decode image %s", path);
+        return NULL;
+    }
+
+    if (!fit_gray_size(&gray, &w, &h)) {
+        free(gray);
+        return NULL;
+    }
+
+    hal_camera_frame_t* frame = calloc(1, sizeof(*frame));
+    if (!frame) {
+        free(gray);
+        return NULL;
+    }
+
+    frame->data           = gray;
+    frame->size           = (size_t)w * h;
+    frame->width          = w;
+    frame->height         = h;
+    frame->bytes_per_line = w;
+    frame->pixfmt         = HAL_CAMERA_FMT_GRAY8;
+    return frame;
+}
+
+/* -- Animated GIFs ----------------------------------------------------- */
+/*
+ * A fountain-encoded multi-part UR is published as an animated GIF holding one
+ * QR code per frame.  The frames are therefore handed out one at a time, at
+ * the pace the GIF itself asks for, so the multi-part UR decoder can collect
+ * parts exactly as it would from a camera watching the animation play on
+ * another wallet's screen.  The animation repeats until the scan ends, because
+ * a missed frame means a part that still has to be read.
+ */
+static hal_file_image_status_t gif_poll(hal_camera_frame_t* out) {
+    if ((int32_t)(lv_tick_get() - s_gif_due_ms) < 0) {
+        return HAL_FILE_IMAGE_NONE; /* the current frame is still playing */
+    }
+
+    uint8_t* gray     = NULL;
+    uint32_t delay_ms = 0;
+    while (!gif_gray_next(s_gif, &gray, &delay_ms)) {
+        if (gif_gray_failed(s_gif)) { /* truncated or corrupt */
+            LOG_WARN("broken GIF");
+            gif_state_reset();
+            return HAL_FILE_IMAGE_FAILED;
+        }
+        if (s_gif_pass_frames <= 1) { /* a still image has nothing to repeat */
+            gif_state_reset();
+            return HAL_FILE_IMAGE_NONE;
+        }
+        gif_gray_rewind(s_gif); /* play the animation again */
+        s_gif_pass_frames = 0;
+    }
+
+    uint32_t w = s_gif_w, h = s_gif_h;
+    if (!fit_gray_size(&gray, &w, &h)) {
+        free(gray);
+        gif_state_reset();
+        return HAL_FILE_IMAGE_FAILED;
+    }
+
+    s_gif_pass_frames++;
+    s_gif_due_ms = lv_tick_get() + delay_ms;
+
+    out->data           = gray;
+    out->size           = (size_t)w * h;
+    out->width          = w;
+    out->height         = h;
+    out->bytes_per_line = w;
+    out->pixfmt         = HAL_CAMERA_FMT_GRAY8;
+    return HAL_FILE_IMAGE_READY;
+}
+
+void hal_file_image_pick(void) {
+    hal_file_image_reset();
+
+    char path[PATH_MAX];
+    if (!pick_image_path(path, sizeof(path))) return; /* cancelled */
+
+    /* An animated GIF (how a fountain-encoded multi-part UR is published as a
+     * file) is not a single frame, so it does not go through the still-image
+     * path below: gif_gray_open() only succeeds on an actual GIF. */
+    uint32_t gw = 0, gh = 0;
+    s_gif = gif_gray_open(path, &gw, &gh);
+    if (s_gif) {
+        s_gif_w           = gw;
+        s_gif_h           = gh;
+        s_gif_due_ms      = 0; /* first frame is handed out on the next poll */
+        s_gif_pass_frames = 0;
+        LOG_INFO("decoded %ux%u GIF from %s", (unsigned)gw, (unsigned)gh, path);
+        return;
+    }
+
+    hal_camera_frame_t* frame = decode_image_file(path);
+    if (!frame) {
+        LOG_WARN("no image decoded from %s", path);
+        s_pick_failed = true;
+        return;
+    }
+
+    LOG_INFO("decoded %ux%u QR image from %s", (unsigned)frame->width, (unsigned)frame->height,
+             path);
+    s_picked = *frame; /* the frame struct is only a header; its data stays owned here */
+    free(frame);
+    s_picked_ready = true;
+}
+
+void hal_file_image_reset(void) {
+    gif_state_reset();
+
+    if (s_picked_ready) {
+        hal_camera_frame_free(&s_picked);
+        s_picked_ready = false;
+    }
+    s_pick_failed = false;
+}
+
+hal_file_image_status_t hal_file_image_poll(hal_camera_frame_t* out) {
+    if (!out) return HAL_FILE_IMAGE_NONE;
+
+    if (s_gif) return gif_poll(out);
+
+    if (s_picked_ready) {
+        *out = s_picked;
+        memset(&s_picked, 0, sizeof(s_picked));
+        s_picked_ready = false;
+        return HAL_FILE_IMAGE_READY;
+    }
+
+    if (s_pick_failed) {
+        s_pick_failed = false;
+        return HAL_FILE_IMAGE_FAILED;
+    }
+
+    return HAL_FILE_IMAGE_NONE;
 }
 
 /* -- Touch / pointer input ------------------------------------------- */

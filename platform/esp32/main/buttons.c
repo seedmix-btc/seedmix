@@ -1,8 +1,11 @@
 /**
  * @file buttons.c
- * @brief Physical GPIO buttons - raw hardware layer.
+ * @brief Physical buttons - raw hardware layer.
  *
- * Reports raw button state only
+ * Reports raw button state only.  Buttons are normally GPIOs, but a board can
+ * route one of them through the IO expander instead (the Waveshare PWR button
+ * is EXIO6); that button is read as active-high, matching the expander's
+ * sense, and ignores CONFIG_SEEDMIX_BUTTONS_ACTIVE_LOW.
  */
 
 #include "buttons.h"
@@ -14,7 +17,18 @@
 
 #if CONFIG_SEEDMIX_BUTTONS_ENABLE
 
+#if CONFIG_SEEDMIX_BUTTONS_EXPANDER_PIN >= 0
+#include "expander.h"
+#endif
+
 static const char* TAG = "buttons";
+
+/* Index of the expander-backed button, or -1 when every button is a GPIO. */
+#if CONFIG_SEEDMIX_BUTTONS_EXPANDER_PIN >= 0
+#define EXPANDER_BUTTON_INDEX 1
+#else
+#define EXPANDER_BUTTON_INDEX (-1)
+#endif
 
 static const int s_gpios[] = {
 #if CONFIG_SEEDMIX_BUTTONS_COUNT > 0
@@ -36,6 +50,16 @@ static const int s_gpios[] = {
 void buttons_init(void) {
 #if CONFIG_SEEDMIX_BUTTONS_ENABLE
     for (int i = 0; i < CONFIG_SEEDMIX_BUTTONS_COUNT; i++) {
+        if (i == EXPANDER_BUTTON_INDEX) {
+#if CONFIG_SEEDMIX_BUTTONS_EXPANDER_PIN >= 0
+            /* Nothing to configure here: expander_read() sets the pin's
+             * direction, and expander_init() reports whether the chip is
+             * there at all. */
+            ESP_LOGI(TAG, "button %d on IO expander pin %d (active-high)", i,
+                     CONFIG_SEEDMIX_BUTTONS_EXPANDER_PIN);
+#endif
+            continue;
+        }
         if (s_gpios[i] < 0) {
             continue;
         }
@@ -73,7 +97,20 @@ int buttons_count(void) {
 
 bool button_is_pressed(int idx) {
 #if CONFIG_SEEDMIX_BUTTONS_ENABLE
-    if (idx < 0 || idx >= CONFIG_SEEDMIX_BUTTONS_COUNT || s_gpios[idx] < 0) {
+    if (idx < 0 || idx >= CONFIG_SEEDMIX_BUTTONS_COUNT) {
+        return false;
+    }
+    if (idx == EXPANDER_BUTTON_INDEX) {
+#if CONFIG_SEEDMIX_BUTTONS_EXPANDER_PIN >= 0
+        bool pressed = false;
+        /* A failed read reports "released", which is the safe answer: a
+         * misbehaving expander must not look like a stuck button. */
+        return expander_read(CONFIG_SEEDMIX_BUTTONS_EXPANDER_PIN, &pressed) && pressed;
+#else
+        return false;
+#endif
+    }
+    if (s_gpios[idx] < 0) {
         return false;
     }
     int level = gpio_get_level(s_gpios[idx]);

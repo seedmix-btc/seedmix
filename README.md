@@ -7,7 +7,7 @@ Prototype on Linux (SDL2) -> deploy to ESP32.
 
 ### 1. Install system dependencies
 ```bash
-sudo apt install build-essential cmake libsdl2-dev autoconf automake libtool libtool-bin
+sudo apt install build-essential cmake libsdl2-dev zlib1g-dev autoconf automake libtool libtool-bin
 ```
 
 ### 2. Clone and build
