@@ -2,13 +2,13 @@
  * @file main/ui/bitvis.c
  * @brief Animated bit-level XOR view (see bitvis.h).
  *
- * The merge screen draws what the XOR does, bit by bit, below the hex text.
- * Each operand is a grid of byte blocks and every block shows its two hex
- * digits above its eight bits. A timer walks one bit per tick, so the merged
- * row fills in as the scan passes each bit.
+ * Each value is drawn as a grid of byte blocks, every block showing its two
+ * hex digits above its eight bits, and a timer walks one bit per tick.  The
+ * XOR view draws A, B and A ^ B; the entropy view draws a single value whose
+ * bits fill in as the scan passes them.
  *
- * The grids are hand-rendered RGB565 buffers so the visual is three
- * lv_image widgets instead of hundreds of bit objects.
+ * The grids are hand-rendered RGB565 buffers so the visual is a few lv_image
+ * widgets instead of hundreds of bit objects.
  */
 
 #include "bitvis.h"
@@ -44,9 +44,13 @@ static const uint8_t s_xv_glyph[16][5] = {
 #define XV_HOLD_TICKS 24 // linger on the finished result
 
 typedef struct {
-    uint8_t  bytes[XV_OPERANDS][XV_MAX_BYTES];
+    uint8_t bytes[XV_OPERANDS][XV_MAX_BYTES];
+    uint8_t operands;  // 1 (single entropy) or 3 (A, B, A ^ B)
+    uint8_t reveal_op; // operand whose bits the scan reveals
+    bool    check;     // verify each revealed bit really is A ^ B
+
     uint16_t elen;
-    int32_t  cur;  // bit index being XORed, -1 before the scan starts
+    int32_t  cur;  // bit index being scanned, -1 before it starts
     int32_t  hold; // ticks left to show the finished result
 
     lv_obj_t*      imgs[XV_OPERANDS];
@@ -142,14 +146,14 @@ static void xv_draw_block(xorview_t* v, int operand, uint16_t index) {
     lv_coord_t bit_y = by + 1 + 5 + 2;
     for (int b = 0; b < 8; b++) {
         int32_t  bit      = first + b;
-        bool     revealed = (operand != 2) || (v->cur >= bit);
+        bool     revealed = (operand != v->reveal_op) || (v->cur >= bit);
         uint16_t color;
         if (bit == v->cur) {
             color = XV_CUR;
         } else if (!revealed) {
             color = XV_BIT_DIM;
         } else if ((v->bytes[operand][index] >> (7 - b)) & 1u) {
-            color = (operand == 2) ? XV_RES_ON : XV_BIT_ON;
+            color = (operand == v->reveal_op) ? XV_RES_ON : XV_BIT_ON;
         } else {
             color = XV_BIT_OFF;
         }
@@ -165,18 +169,23 @@ static void xv_draw_operand(xorview_t* v, int operand) {
 }
 
 static void xv_draw_all(xorview_t* v) {
-    for (int op = 0; op < XV_OPERANDS; op++) xv_draw_operand(v, op);
+    for (int op = 0; op < v->operands; op++) xv_draw_operand(v, op);
 }
 
 static void xv_status(xorview_t* v) {
     if (!v->status) return;
     char text[64];
     if (v->cur < 0) {
-        snprintf(text, sizeof(text), "%u bytes   A ^ B", (unsigned)v->elen);
-    } else {
+        snprintf(text, sizeof(text), "%u bytes   %s", (unsigned)v->elen,
+                 v->check ? "A ^ B" : "entropy");
+    } else if (v->check) {
         uint16_t bit = (uint16_t)v->cur;
         snprintf(text, sizeof(text), "bit %u/%u:   %u ^ %u = %u", (unsigned)bit + 1,
                  (unsigned)v->total_bits, xv_bit(v, 0, bit), xv_bit(v, 1, bit), xv_bit(v, 2, bit));
+    } else {
+        uint16_t bit = (uint16_t)v->cur;
+        snprintf(text, sizeof(text), "bit %u/%u:   %u", (unsigned)bit + 1, (unsigned)v->total_bits,
+                 xv_bit(v, 0, bit));
     }
     lv_label_set_text(v->status, text);
 }
@@ -191,7 +200,7 @@ static void xv_tick(lv_timer_t* timer) {
         if (--v->hold == 0) { // pass finished: clear the highlight and restart
             v->cur = -1;
             xv_draw_all(v);
-            for (int op = 0; op < XV_OPERANDS; op++) {
+            for (int op = 0; op < v->operands; op++) {
                 if (v->imgs[op]) lv_obj_invalidate(v->imgs[op]);
             }
             xv_status(v);
@@ -203,12 +212,12 @@ static void xv_tick(lv_timer_t* timer) {
     if (v->cur >= (int32_t)v->total_bits) {
         v->cur  = (int32_t)v->total_bits - 1; // linger on the last bit
         v->hold = XV_HOLD_TICKS;
-    } else {
+    } else if (v->check) {
         xv_check_bit(v, (uint16_t)v->cur); // the bit the scan just reached
     }
 
     // Only the block the scan left and the one it entered change.
-    for (int op = 0; op < XV_OPERANDS; op++) {
+    for (int op = 0; op < v->operands; op++) {
         uint16_t now = (uint16_t)(v->cur >> 3);
         if (prev >= 0) {
             uint16_t before = (uint16_t)(prev >> 3);
@@ -241,25 +250,34 @@ static void xv_cleanup(lv_event_t* e) {
     lv_free(v);
 }
 
-void bitvis_add_xor(lv_obj_t* parent, lv_obj_t* screen, const char* a_hex, const char* b_hex,
-                    const char* r_hex) {
+/* Shared builder: @p n_ops grids drawn from @p hexs, each labelled by @p names
+ * (NULL for none), with the bits of operand @p reveal_op revealed by the scan.
+ * When @p check is set every revealed bit is verified to be the XOR of the
+ * first two operands. */
+static void xv_build(lv_obj_t* parent, lv_obj_t* screen, const char* const* hexs, uint8_t n_ops,
+                     const char* const* names, uint8_t reveal_op, bool check) {
     ASSERT_OR_DIE(parent && screen, "bitvis: null parent/screen");
-    ASSERT_OR_DIE(a_hex && b_hex && r_hex, "bitvis: null hex string");
+    for (uint8_t i = 0; i < n_ops; i++) {
+        ASSERT_OR_DIE(hexs[i], "bitvis: null hex string");
+    }
 
-    size_t elen = strlen(a_hex) / 2;
+    size_t elen = strlen(hexs[0]) / 2;
     ASSERT_OR_DIE(elen > 0 && elen <= XV_MAX_BYTES, "bitvis: bad entropy length (%zu)", elen);
-    ASSERT_OR_DIE(strlen(b_hex) == 2 * elen && strlen(r_hex) == 2 * elen,
-                  "bitvis: hex strings differ in length");
+    for (uint8_t i = 1; i < n_ops; i++) {
+        ASSERT_OR_DIE(strlen(hexs[i]) == 2 * elen, "bitvis: hex strings differ in length");
+    }
 
     xorview_t* v = lv_malloc(sizeof(*v));
     ASSERT_OR_DIE(v, "bitvis: out of memory");
     memset(v, 0, sizeof(*v));
-    v->screen = screen;
-    v->elen   = (uint16_t)elen;
-    ASSERT_OR_DIE(xv_parse_hex(a_hex, v->bytes[0], elen) &&
-                      xv_parse_hex(b_hex, v->bytes[1], elen) &&
-                      xv_parse_hex(r_hex, v->bytes[2], elen),
-                  "bitvis: invalid hex string");
+    v->screen    = screen;
+    v->operands  = n_ops;
+    v->reveal_op = reveal_op;
+    v->check     = check;
+    v->elen      = (uint16_t)elen;
+    for (uint8_t i = 0; i < n_ops; i++) {
+        ASSERT_OR_DIE(xv_parse_hex(hexs[i], v->bytes[i], elen), "bitvis: invalid hex string");
+    }
 
     // Grid of bytes.  Keep blocks at least ~28 px wide so the bits stay
     // visible; on a narrow panel that means fewer columns and more rows.
@@ -289,7 +307,7 @@ void bitvis_add_xor(lv_obj_t* parent, lv_obj_t* screen, const char* a_hex, const
     v->cur        = -1;
 
     v->buf_bytes = (size_t)v->w * (size_t)v->h * 2u;
-    for (int i = 0; i < XV_OPERANDS; i++) {
+    for (uint8_t i = 0; i < v->operands; i++) {
         v->buf[i] = malloc(v->buf_bytes);
         ASSERT_OR_DIE(v->buf[i], "bitvis: out of memory for %zu-byte buffer", v->buf_bytes);
     }
@@ -304,12 +322,13 @@ void bitvis_add_xor(lv_obj_t* parent, lv_obj_t* screen, const char* a_hex, const
     lv_obj_set_flex_flow(vis, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(vis, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    static const char* const names[XV_OPERANDS] = {"Current", "New", "A ^ B"};
-    for (int i = 0; i < XV_OPERANDS; i++) {
-        lv_obj_t* lbl = lv_label_create(vis);
-        lv_label_set_text(lbl, names[i]);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
-        lv_obj_set_style_text_font(lbl, ui_font(12), 0);
+    for (uint8_t i = 0; i < v->operands; i++) {
+        if (names) {
+            lv_obj_t* lbl = lv_label_create(vis);
+            lv_label_set_text(lbl, names[i]);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+            lv_obj_set_style_text_font(lbl, ui_font(12), 0);
+        }
 
         memset(&v->dsc[i], 0, sizeof(v->dsc[i]));
         v->dsc[i].header.magic  = LV_IMAGE_HEADER_MAGIC;
@@ -335,4 +354,16 @@ void bitvis_add_xor(lv_obj_t* parent, lv_obj_t* screen, const char* a_hex, const
 
     lv_obj_add_event_cb(screen, xv_cleanup, LV_EVENT_DELETE, v);
     v->timer = lv_timer_create(xv_tick, XV_TICK_MS, v);
+}
+
+void bitvis_add_xor(lv_obj_t* parent, lv_obj_t* screen, const char* a_hex, const char* b_hex,
+                    const char* r_hex) {
+    static const char* const names[3] = {"Current", "New", "A ^ B"};
+    const char*              hexs[3]  = {a_hex, b_hex, r_hex};
+    xv_build(parent, screen, hexs, 3, names, 2, true);
+}
+
+void bitvis_add_entropy(lv_obj_t* parent, lv_obj_t* screen, const char* hex) {
+    const char* hexs[1] = {hex};
+    xv_build(parent, screen, hexs, 1, NULL, 0, false);
 }

@@ -90,6 +90,19 @@ static void on_generating_msg(const char* msg) {
     ui_delay_ms(1500);
 }
 
+// Show the current working seed as raw entropy; the mnemonic words are only
+// shown at the final stage.
+static void show_entropy_screen(mnemonic_t* m, mnemonic_type_t type, ui_cb_t on_ok) {
+    uint8_t ent[32];
+    size_t  elen = mnemonic_entropy_size(m);
+    mnemonic_to_entropy(m, ent);
+    char hex[2 * 32 + 1];
+    ASSERT_OR_DIE(bytes_to_hex(ent, elen, hex, sizeof(hex)), "entropy hex buffer too small");
+    secure_memzero(ent, sizeof(ent));
+    ui_show_entropy(hex, type, on_ok);
+    secure_memzero(hex, sizeof(hex)); // the screen keeps its own copy
+}
+
 // Combine `m` into `current` if the word counts match, otherwise discard `m`
 // and return to the source screen
 static void merge_or_reject(mnemonic_t* m, mnemonic_type_t result_type, const char* source_desc) {
@@ -106,7 +119,7 @@ static void merge_or_reject(mnemonic_t* m, mnemonic_type_t result_type, const ch
     } else {
         current = m;
         ui_log_add("started with %s", source_desc);
-        ui_show_mnemonic(mnemonic_words(current), result_type, go_source, NULL);
+        show_entropy_screen(current, result_type, go_source);
     }
 }
 
@@ -131,14 +144,13 @@ static void on_we_complete(void);
 
 static void on_merge_done(void) {
     ASSERT_OR_DIE(pending_new, "no pending mnemonic");
-    // The merge screen still holds entropy hex + words, it stays the active
-    // screen until ui_swap_screen() runs inside ui_show_mnemonic(), so scrub
-    // it now instead of waiting for deferred deletion
+    // The merge screen already showed the merged entropy, so just commit.
+    // Scrub it now: its delete is deferred until the next screen is swapped in.
     ui_scrub_screen(lv_screen_active());
     current     = mnemonic_combine(current, pending_new);
     pending_new = NULL;
     ui_log_add("merged with %s", pending_desc);
-    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_MERGED, go_source, NULL);
+    go_source();
 }
 
 static void show_merge_screen(mnemonic_t* new_m, const char* source_desc) {
@@ -147,8 +159,6 @@ static void show_merge_screen(mnemonic_t* new_m, const char* source_desc) {
     mnemonic_to_entropy(current, ca);
     mnemonic_to_entropy(new_m, na);
     for (size_t i = 0; i < elen; i++) ma[i] = ca[i] ^ na[i];
-
-    mnemonic_t* preview = mnemonic_from_entropy(ma, elen);
 
     char ca_hex[2 * 32 + 1], na_hex[2 * 32 + 1], ma_hex[2 * 32 + 1];
     ASSERT_OR_DIE(bytes_to_hex(ca, elen, ca_hex, sizeof(ca_hex)), "merge hex buffer too small");
@@ -162,10 +172,9 @@ static void show_merge_screen(mnemonic_t* new_m, const char* source_desc) {
     pending_new = new_m;
     snprintf(pending_desc, sizeof(pending_desc), "%s", source_desc);
 
-    ui_show_merge_process(mnemonic_words(current), ca_hex, na_hex, ma_hex, mnemonic_words(preview),
-                          on_merge_done);
+    // The result mnemonic is only revealed on the screen shown after Ok.
+    ui_show_merge_process(ca_hex, na_hex, ma_hex, on_merge_done);
 
-    mnemonic_discard(preview);
     // Wipe the hex renderings after use
     secure_memzero(ca_hex, sizeof(ca_hex));
     secure_memzero(na_hex, sizeof(na_hex));
@@ -1174,7 +1183,7 @@ static void on_we_complete(void) {
     // Show the completed mnemonic and ask the user to confirm before it is
     // used
     pending_new = m;
-    ui_show_mnemonic(mnemonic_words(m), MNEMONIC_TYPE_ENTERED, on_we_ok, NULL);
+    show_entropy_screen(m, MNEMONIC_TYPE_ENTERED, on_we_ok);
 }
 
 static void on_we_ok(void) {
@@ -1256,7 +1265,7 @@ static void on_we_word_selected(const char* last_word) {
                    word_count);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
     pending_new = m;
-    ui_show_mnemonic(mnemonic_words(m), MNEMONIC_TYPE_ENTERED, on_we_ok, NULL);
+    show_entropy_screen(m, MNEMONIC_TYPE_ENTERED, on_we_ok);
 }
 
 // -- Re-enter source with correct title based on state -----------------

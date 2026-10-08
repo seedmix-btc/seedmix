@@ -1251,9 +1251,65 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
     ui_swap_screen(s);
 }
 
-void ui_show_merge_process(const char* current_words, const char* current_entropy_hex,
-                           const char* new_entropy_hex, const char* merged_entropy_hex,
-                           const char* merged_words, ui_cb_t on_ok) {
+void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, ui_cb_t on_ok) {
+    ASSERT_OR_DIE(entropy_hex, "null entropy");
+    ASSERT_OR_DIE(on_ok, "null on_ok");
+
+    lv_obj_t* s = ui_make_screen();
+
+    const char* title;
+    switch (type) {
+    case MNEMONIC_TYPE_GENERATED:
+        title = "Generated Entropy";
+        break;
+    case MNEMONIC_TYPE_ENTERED:
+        title = "Entered Entropy";
+        break;
+    case MNEMONIC_TYPE_MERGED:
+        title = "Merged Entropy";
+        break;
+    default:
+        title = "Entropy";
+        break;
+    }
+    ui_add_title(s, title);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, ui_scale(440), ui_scale(200));
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+
+    lv_obj_t* lbl = lv_label_create(cont);
+    lv_label_set_text(lbl, "Entropy:");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+
+    lv_obj_t* val = lv_label_create(cont);
+    lv_label_set_text(val, entropy_hex);
+    lv_obj_set_style_text_color(val, lv_color_white(), 0);
+    lv_obj_set_style_text_font(val, ui_font(14), 0);
+    lv_obj_set_width(val, ui_scale(420));
+    lv_label_set_long_mode(val, LV_LABEL_LONG_WRAP);
+
+    // Bit-level view of the same entropy, animated below the hex text.
+    bitvis_add_entropy(cont, s, entropy_hex);
+
+    if (!hal_touch_available()) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align_to(arrows, cont, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
+    }
+
+    ui_add_btn(s, "Ok", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    ui_swap_screen(s);
+}
+
+void ui_show_merge_process(const char* current_entropy_hex, const char* new_entropy_hex,
+                           const char* merged_entropy_hex, ui_cb_t on_ok) {
     ASSERT_OR_DIE(on_ok, "null on_ok");
 
     lv_obj_t* s = ui_make_screen();
@@ -1271,14 +1327,12 @@ void ui_show_merge_process(const char* current_words, const char* current_entrop
     struct {
         const char* label;
         const char* value;
-    } lines[] = {{"Current mnemonic:", current_words},
-                 {"Current entropy:", current_entropy_hex},
+    } lines[] = {{"Current entropy:", current_entropy_hex},
                  {"", ""},
                  {"New entropy:", new_entropy_hex},
                  {"", ""},
                  {"--- XOR merge ---", ""},
                  {"Merged entropy:", merged_entropy_hex},
-                 {"Merged mnemonic:", merged_words},
                  {NULL, NULL}};
 
     for (int i = 0; lines[i].label; i++) {

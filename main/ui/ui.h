@@ -66,9 +66,21 @@ void        ui_show_enter_words(ui_cb_t on_ok);
 const char* ui_get_entered_words(void);
 
 void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export);
-void ui_show_merge_process(const char* current_words, const char* current_entropy_hex,
-                           const char* new_entropy_hex, const char* merged_entropy_hex,
-                           const char* merged_words, ui_cb_t on_ok);
+
+/**
+ * @brief Show the entropy merge in progress: the two input entropies, the XOR
+ *        result and the animated bit view.  The mnemonic words are only shown
+ *        on the screen that follows Ok (the final stage).
+ */
+void ui_show_merge_process(const char* current_entropy_hex, const char* new_entropy_hex,
+                           const char* merged_entropy_hex, ui_cb_t on_ok);
+
+/**
+ * @brief Show a working seed as raw entropy: the hex value and the animated
+ *        bit view.  Used for the generated / entered / merged stages; the
+ *        mnemonic words are only shown on the final stage.
+ */
+void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, ui_cb_t on_ok);
 void ui_show_msg(const char* msg);
 
 /**

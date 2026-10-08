@@ -34,6 +34,15 @@ extern "C" {
 void bitvis_add_xor(lv_obj_t* parent, lv_obj_t* screen, const char* a_hex, const char* b_hex,
                     const char* r_hex);
 
+/**
+ * @brief Add an animated bit-level view of a single value to @p parent.
+ *
+ * Same layout and scan as bitvis_add_xor(), but one grid: its bits fill in
+ * from the left as the scan passes them.  Used to show a working seed as raw
+ * entropy.  Errors out under the same conditions as bitvis_add_xor().
+ */
+void bitvis_add_entropy(lv_obj_t* parent, lv_obj_t* screen, const char* hex);
+
 #ifdef __cplusplus
 }
 #endif
