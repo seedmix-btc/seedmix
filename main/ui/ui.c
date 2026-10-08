@@ -7,6 +7,7 @@
 #include "assets/logo_img.h"
 #include "assets/splash_240x135_img.h"
 #include "assets/splash_480x320_img.h"
+#include "bitvis.h"
 #include "hal.h"
 #include "mnemonic_view.h"
 #include "src/widgets/label/lv_label_private.h"
@@ -1296,6 +1297,9 @@ void ui_show_merge_process(const char* current_words, const char* current_entrop
             lv_label_set_long_mode(val, LV_LABEL_LONG_WRAP);
         }
     }
+
+    // Bit-level view of the same XOR, animated below the hex text.
+    bitvis_add_xor(cont, s, current_entropy_hex, new_entropy_hex, merged_entropy_hex);
 
     if (!hal_touch_available()) {
         lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));

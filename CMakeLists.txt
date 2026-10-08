@@ -36,6 +36,7 @@ endif()
 set(COMMON_SOURCES
     main/main.c
     main/ui/ui.c
+    main/ui/bitvis.c
     main/assets/splash_480x320_img.c
     main/assets/splash_240x135_img.c
     main/assets/logo_img.c
