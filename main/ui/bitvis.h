@@ -19,12 +19,12 @@ extern "C" {
  * Draws three grids of byte blocks - A, B and A ^ B - from three hex strings
  * (lowercase, no prefix, all the same length) and animates a bit-by-bit scan:
  * a highlight walks one bit per tick and the merged row fills in as each bit
- * is XORed.  A label below the grids shows the current `a ^ b = r`. Each bit
+ * is XORed. A label below the grids shows the current `a ^ b = r`. Each bit
  * is re-derived from A and B when the scan reaches it and checked against the
  * merged bit, so a wrong result errors out instead of being drawn.
  *
  * The grids are hand-rendered RGB565 buffers shown with lv_image widgets and a
- * timer drives the animation.  The buffers hold entropy bits, so they are
+ * timer drives the animation. The buffers hold entropy bits, so they are
  * wiped and freed when @p screen is deleted; @p screen must be the screen that
  * owns @p parent.
  *
@@ -39,13 +39,13 @@ void bitvis_add_xor(lv_obj_t* parent, lv_obj_t* screen, const char* a_hex, const
  * @brief Add an animated bit-level view of a single value to @p parent.
  *
  * Same layout and scan as bitvis_add_xor(), but one grid: its bits fill in
- * from the left as the scan passes them.  Used to show a working seed as raw
- * entropy.  Errors out under the same conditions as bitvis_add_xor().
+ * from the left as the scan passes them. Used to show a working seed as raw
+ * entropy. Errors out under the same conditions as bitvis_add_xor().
  */
 void bitvis_add_entropy(lv_obj_t* parent, lv_obj_t* screen, const char* hex);
 
 /**
- * A bit grid whose contents the caller sets (no animation).  Use it for streams
+ * A bit grid whose contents the caller sets (no animation). Use it for streams
  * that grow from user input rather than a timer, e.g. dice/coin collection.
  */
 typedef struct {
@@ -64,7 +64,7 @@ void bitvis_grid_create(bitvis_grid_t* g, lv_obj_t* parent, lv_obj_t* screen, ui
 /**
  * @brief Show a caller-filled grid: known bits, with the newest ones highlighted.
  *
- * @p bytes holds the stream MSB-first with @p filled_bits of them known.  Bits
+ * @p bytes holds the stream MSB-first with @p filled_bits of them known. Bits
  * from @p highlight_from up are drawn highlighted (e.g. the bits the latest roll
  * produced); everything past @p filled_bits stays unknown.
  */
@@ -83,7 +83,7 @@ typedef struct {
  * @brief Draw a roll readout of @p cells bit cells inside @p parent.
  *
  * @p cells should be as wide as the die's longest part, i.e. the most bits one
- * roll can contribute; a roll worth fewer shows just those bits.  Drawn with
+ * roll can contribute; a roll worth fewer shows just those bits. Drawn with
  * the same cells, colours and font as the grid, so build it against the same
  * @p screen and it lines up with it.  @p r must outlive @p screen: its widgets
  * are released when @p screen is deleted, after which bitvis_roll_set() does

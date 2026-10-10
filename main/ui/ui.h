@@ -46,21 +46,46 @@ void ui_show_tx_inspect(const char* title, const char* body, const char* warning
  * @brief Show a scrollable overview of a scanned wallet descriptor.
  *
  * Shown between scanning the descriptor and using it, so a wrong wallet can be
- * spotted while scanning another one is still cheap.  The body is one long
+ * spotted while scanning another one is still cheap. The body is one long
  * scrollable text block (see descriptor_overview()), so a descriptor that does
  * not fit on screen can still be read in full.  @p on_continue accepts the
  * descriptor, @p on_cancel discards it.
  */
 void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on_continue,
                                  ui_cb_t on_cancel);
-void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel);
-void ui_touch_screen_set_status(const char* text);
+/**
+ * @brief Show the touch collection screen.
+ *
+ * The screen is read as an 8x8 grid of tiles and each tap writes its tile's
+ * number as whole bits, so the screen shows real bits rather than an estimate.
+ * They are hashed into the seed when @p target_bits are reached, and the seed is
+ * then shown beside them until @p on_continue is pressed.  @p on_help may be
+ * NULL to leave the Help button off.
+ */
+void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel, ui_cb_t on_help,
+                          ui_cb_t on_continue, uint32_t target_bits);
+
+/**
+ * @brief Show how far the taps have got.
+ *
+ * @p bytes holds the tapped bits (MSB-first) of which @p bits are collected,
+ * @p target_bits is the target, @p taps the count and @p last_tile the tile the
+ * newest tap landed in (0..63).
+ */
+void ui_touch_screen_set_progress(const uint8_t* bytes, uint32_t bits, uint32_t target_bits,
+                                  unsigned taps, unsigned last_tile);
+
+/** @brief Show the finished seed beside the tapped bits, and a Continue button. */
+void ui_touch_screen_show_seed(const uint8_t* seed, size_t seed_len);
+
+/** @brief Show the "taps to bits" help screen. */
+void ui_show_touch_help(ui_cb_t on_close);
 void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back);
 /**
  * @brief Show the dice collection screen.
  *
  * @p total_bits is the target (128 or 256); the bit grid is sized to it and
- * fills in as rolls arrive.  The screen also shows what a roll of @p sides is
+ * fills in as rolls arrive. The screen also shows what a roll of @p sides is
  * worth on average and how many rolls are roughly left.
  */
 void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_cb_t on_help,
@@ -71,7 +96,7 @@ void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_
  *
  * @p bytes holds the collected entropy (MSB-first), of which @p filled_bits are
  * known; @p last_roll / @p last_bits describe the newest roll, whose bits are
- * highlighted in the grid.  Bits are never held back: what a roll is worth is in
+ * highlighted in the grid. Bits are never held back: what a roll is worth is in
  * the seed straight away.
  */
 void ui_dice_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
@@ -101,7 +126,7 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
 
 /**
  * @brief Show the entropy merge in progress: the two input entropies, the XOR
- *        result and the animated bit view.  The mnemonic words are only shown
+ *        result and the animated bit view. The mnemonic words are only shown
  *        on the screen that follows Ok (the final stage).
  */
 void ui_show_merge_process(const char* current_entropy_hex, const char* new_entropy_hex,
@@ -109,7 +134,7 @@ void ui_show_merge_process(const char* current_entropy_hex, const char* new_entr
 
 /**
  * @brief Show a working seed as raw entropy: the hex value and the animated
- *        bit view.  Used for the generated / entered / merged stages; the
+ *        bit view. Used for the generated / entered / merged stages; the
  *        mnemonic words are only shown on the final stage.
  */
 void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, ui_cb_t on_ok);
@@ -130,7 +155,7 @@ void ui_show_confirm(const char* title, const char* msg, const char* yes_label,
  *
  * @p options holds @p count NUL-terminated button labels.  @p on_choice is
  * called with the index of the selected option and @p on_cancel (optional)
- * when Cancel is pressed.  The list scrolls when the options don't fit.
+ * when Cancel is pressed. The list scrolls when the options don't fit.
  */
 void ui_show_choice(const char* title, const char* msg, const char* const* options, size_t count,
                     ui_uint_cb_t on_choice, ui_cb_t on_cancel);
@@ -144,7 +169,7 @@ void ui_go_main(void);
  * @brief Attach a keypad/encoder input device for button navigation.
  *
  * Creates the shared navigation group and routes the input device to it.
- * Call once after lv_init() and before the first screen is shown.  The group
+ * Call once after lv_init() and before the first screen is shown. The group
  * is rebuilt automatically every time a screen is swapped in, collecting the
  * screen's focusable widgets (buttons, textareas, keyboards and clickable
  * labels).
@@ -162,7 +187,7 @@ void ui_show_splash(ui_cb_t on_done);
 /**
  * @brief Zero all label text on @p scr (recursively) without deleting it.
  *
- * lv_label_set_text() copies strings into LVGL heap memory.  Call this on a
+ * lv_label_set_text() copies strings into LVGL heap memory. Call this on a
  * screen that displayed secrets (mnemonic words, entropy hex) as soon as it
  * is no longer shown, so the copies don't linger until deferred deletion.
  */

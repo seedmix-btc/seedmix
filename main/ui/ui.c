@@ -12,6 +12,7 @@
 #include "hal.h"
 #include "mnemonic_view.h"
 #include "src/widgets/label/lv_label_private.h"
+#include "touch.h"
 #include "ui_internal.h"
 #include "util/error.h"
 #include "util/utils.h"
@@ -51,7 +52,7 @@ static lv_image_dsc_t seedqr_dsc;              // descriptor backing the SeedQR 
 static uint8_t*       seedqr_buf       = NULL; // RGB565 buffer for the SeedQR image
 static size_t         seedqr_buf_bytes = 0;
 
-// Recursively zero the text of every label under `obj`.  lv_label_set_text()
+// Recursively zero the text of every label under `obj`. lv_label_set_text()
 // copies strings into LVGL-allocated memory; freeing the object does NOT wipe
 // those copies, so mnemonic words and entropy hex would linger in the heap.
 static void wipe_label_texts(lv_obj_t* obj) {
@@ -79,7 +80,7 @@ lv_obj_t* ui_make_screen(void) {
 }
 
 /* -- UI scaling ------------------------------------------------------- */
-/* The shared UI is laid out against a 480x320 reference resolution.  On
+/* The shared UI is laid out against a 480x320 reference resolution. On
  * smaller/larger displays everything is scaled by a single uniform factor
  * (the limiting dimension) so screens keep their proportions and fit. */
 #define UI_REF_W 480
@@ -374,9 +375,9 @@ static void splash_timer_cb(lv_timer_t* t) {
     lv_obj_delete(screen);  // splash is no longer active - safe to free
 }
 
-/* Splash variants are keyed by their native resolution.  Pick the one whose
+/* Splash variants are keyed by their native resolution. Pick the one whose
  * aspect ratio is closest to the active display so any panel (desktop, TTGO,
- * or a future device) gets crisp, undistorted art.  Add a new entry here when
+ * or a future device) gets crisp, undistorted art. Add a new entry here when
  * a new splash_<W>x<H> asset is generated. */
 static const struct {
     const lv_image_dsc_t* dsc;
@@ -555,81 +556,8 @@ void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_qr, ui_cb_t on_dice
 }
 
 /* -- Touch screen entropy --------------------------------------------- */
-static lv_obj_t* touch_status = NULL;
-
-static void touch_status_delete_cb(lv_event_t* e) {
-    (void)e;
-    touch_status = NULL; // invalidate the pointer when the label is deleted
-}
-
-static void touch_area_tap_cb(lv_event_t* e) {
-    union {
-        ui_tap_cb_t fn;
-        void*       vp;
-    } u;
-    u.vp = lv_event_get_user_data(e);
-    if (!u.fn) return;
-
-    lv_indev_t* indev = lv_event_get_indev(e);
-    if (!indev) return;
-    if (lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) return;
-    lv_point_t p;
-    lv_indev_get_point(indev, &p);
-    u.fn(p.x, p.y);
-}
-
-void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel) {
-    ASSERT_OR_DIE(on_tap, "null on_tap");
-    ASSERT_OR_DIE(on_cancel, "null on_cancel");
-
-    lv_obj_t* s = ui_make_screen();
-
-    // Full-screen touch target (behind the cancel button).
-    lv_obj_t* area = lv_obj_create(s);
-    lv_obj_set_size(area, LV_PCT(100), LV_PCT(100));
-    lv_obj_align(area, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_bg_color(area, lv_color_hex(0x0a0a0a), 0);
-    lv_obj_set_style_border_width(area, 0, 0);
-    lv_obj_add_flag(area, LV_OBJ_FLAG_CLICKABLE);
-    union {
-        ui_tap_cb_t fn;
-        void*       vp;
-    } u = {.fn = on_tap};
-    lv_obj_add_event_cb(area, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
-
-    ui_add_title(area, "Touch Screen");
-
-    touch_status = lv_label_create(area);
-    lv_obj_add_event_cb(touch_status, touch_status_delete_cb, LV_EVENT_DELETE, NULL);
-    lv_label_set_text(touch_status, "Tap anywhere to collect entropy");
-    lv_obj_set_style_text_color(touch_status, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_text_font(touch_status, ui_font(18), 0);
-    lv_obj_set_style_text_align(touch_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(touch_status, LV_ALIGN_CENTER, 0, 0);
-
-    // Cancel button - centered below the status text.
-    // A short tap passes through and still collects entropy, hold (long
-    // press) to activate cancel.
-    lv_obj_t* cancel_btn = lv_button_create(s);
-    lv_obj_set_size(cancel_btn, ui_scale(240), ui_scale(44));
-    lv_obj_align(cancel_btn, LV_ALIGN_CENTER, 0, ui_scale(70));
-    lv_obj_add_event_cb(cancel_btn, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
-    union {
-        ui_cb_t fn;
-        void*   vp;
-    } u_cancel = {.fn = on_cancel};
-    lv_obj_add_event_cb(cancel_btn, ui_btn_invoke, LV_EVENT_LONG_PRESSED, u_cancel.vp);
-    lv_obj_t* cancel_lbl = lv_label_create(cancel_btn);
-    lv_label_set_text(cancel_lbl, "Cancel (hold to activate)");
-    lv_obj_set_style_text_font(cancel_lbl, ui_font(14), 0);
-    lv_obj_center(cancel_lbl);
-
-    ui_swap_screen(s);
-}
-
-void ui_touch_screen_set_status(const char* text) {
-    if (touch_status) lv_label_set_text(touch_status, text);
-}
+// The touch screen lives at the end of this file: it reuses the entropy meter
+// below and the help helpers, which are both defined further down.
 
 /* -- Dice sides picker ----------------------------------------------- */
 static ui_uint_cb_t dice_on_sides = NULL;
@@ -680,7 +608,7 @@ void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back) {
 }
 
 /* -- Entropy collection meter ----------------------------------------- */
-// Widest part of the die, i.e. the most bits one roll can add.  A die is read as
+// Widest part of the die, i.e. the most bits one roll can add. A die is read as
 // a sum of power-of-two parts (see dice.c), so this is floor(log2(sides)).
 static unsigned roll_max_bits(unsigned sides) {
     unsigned k = 0;
@@ -689,7 +617,7 @@ static unsigned roll_max_bits(unsigned sides) {
 }
 
 // Expected bits per roll in thousandths, summed over the faces with the same
-// rule the collector runs.  A power-of-two die gives its full log2(sides);
+// rule the collector runs. A power-of-two die gives its full log2(sides);
 // splitting costs the rest (a d6 pays 1.67 where 2.58 is available).
 static unsigned roll_rate_milli(unsigned sides) {
     unsigned long sum = 0;
@@ -697,21 +625,30 @@ static unsigned roll_rate_milli(unsigned sides) {
     return (unsigned)(sum * 1000ul / sides);
 }
 
-/* The dice/coin screens build the seed bit by bit, so they reuse the byte
- * blocks of the merge/entropy views (bitvis) and fill them in as rolls land.
- * The collected bits ARE the entropy. */
+/* The dice, coin and touch screens all hand out whole bits, so they share this
+ * meter: the counts, the newest input's bits as one block of the same grid, the
+ * rate it pays and how much is left, and the grid itself. */
 
 typedef struct {
     lv_obj_t*     counts;
-    bitvis_roll_t roll; // the last roll, drawn like one byte block
-    lv_obj_t*     rate; // "1.67 bits/roll", what the die averages
-    lv_obj_t*     togo; // "~77 rolls left"
+    bitvis_roll_t roll; // the newest input, drawn like one byte block
+    lv_obj_t*     rate; // "6.00 bits/tap", what this source pays
+    lv_obj_t*     togo; // "~43 taps left"
+    const char*   singular;
+    const char*   plural;
     unsigned      rate_milli;
     bitvis_grid_t grid;
 } entropy_meter_t;
 
 static entropy_meter_t dice_meter;
 static entropy_meter_t coin_meter;
+static entropy_meter_t touch_meter;
+
+// A plain lv_obj takes clicks by default, which would swallow the taps a screen
+// behind it collects; the meter and its rows are all decoration.
+void ui_clickthrough(lv_obj_t* obj) {
+    if (obj) lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+}
 
 static void meter_delete_cb(lv_event_t* e) {
     entropy_meter_t* m = lv_event_get_user_data(e);
@@ -722,6 +659,9 @@ static void meter_delete_cb(lv_event_t* e) {
 // tall grid scrolls instead of eating the buttons.
 static lv_obj_t* meter_panel_create(lv_obj_t* parent) {
     lv_obj_t* panel = lv_obj_create(parent);
+    // The panel keeps its clicks: it is the scrollable object, so dragging the
+    // grid inside it scrolls. A caller that collects taps adds a handler.
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_size(panel, ui_scale(440), LV_SIZE_CONTENT);
     lv_obj_set_style_max_height(panel, ui_scale(104), 0);
     lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, ui_scale(50));
@@ -739,6 +679,7 @@ static lv_obj_t* meter_panel_create(lv_obj_t* parent) {
 // (every roll is whole bits, none are held back) and how much more it costs.
 static void meter_rate_create(entropy_meter_t* m, lv_obj_t* parent) {
     lv_obj_t* row = lv_obj_create(parent);
+    ui_clickthrough(row);
     lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
@@ -759,15 +700,19 @@ static void meter_rate_create(entropy_meter_t* m, lv_obj_t* parent) {
     lv_obj_set_style_text_font(m->togo, ui_font(12), 0);
 }
 
-// Build the counts + last-roll block, the rate row and the bit grid, inside
-// @p parent.  The block gets one cell per bit @p sides can add at most; @p prompt
-// shows until the first input.
+// Build the counts + newest-input block, the rate row and the bit grid, inside
+// @p parent. The block gets @p block_cells cells, the most bits one input can
+// add; @p prompt shows until the first input.
 static void meter_create(entropy_meter_t* m, lv_obj_t* parent, lv_obj_t* screen,
-                         uint32_t total_bits, unsigned sides, const char* prompt) {
+                         uint32_t total_bits, unsigned block_cells, unsigned rate_milli,
+                         const char* singular, const char* plural, const char* prompt) {
     memset(m, 0, sizeof(*m));
-    m->rate_milli = roll_rate_milli(sides);
+    m->rate_milli = rate_milli;
+    m->singular   = singular;
+    m->plural     = plural;
 
     lv_obj_t* row = lv_obj_create(parent);
+    ui_clickthrough(row);
     lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
@@ -781,8 +726,8 @@ static void meter_create(entropy_meter_t* m, lv_obj_t* parent, lv_obj_t* screen,
     lv_obj_set_style_text_color(m->counts, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_font(m->counts, ui_font(14), 0);
 
-    // The last roll, as one block of the same grid.
-    bitvis_roll_create(&m->roll, row, screen, roll_max_bits(sides));
+    // The newest input, as one block of the same grid.
+    bitvis_roll_create(&m->roll, row, screen, block_cells);
 
     meter_rate_create(m, parent);
 
@@ -790,41 +735,36 @@ static void meter_create(entropy_meter_t* m, lv_obj_t* parent, lv_obj_t* screen,
     lv_obj_add_event_cb(parent, meter_delete_cb, LV_EVENT_DELETE, m);
 }
 
-// Refresh the counts, the rate row, the last-roll block and the grid (@p coin
-// picks the wording).  Every roll is worth whole bits, so there is nothing in
-// flight: what the die pays now is what the seed has.
+// Refresh the counts, the rate row, the newest-input block and the grid (@p face
+// is the label for the block, built by the caller). Every input is worth whole
+// bits, so there is nothing in flight: what the source pays now is what the grid
+// has.
 static void meter_set(entropy_meter_t* m, const uint8_t* bytes, unsigned count, uint32_t filled,
-                      uint32_t needed, unsigned last_roll, uint32_t last_bits, bool coin) {
+                      uint32_t target, const char* face, uint32_t last_bits) {
     if (!m->counts) return;
 
     char text[64];
     int  res = snprintf(text, sizeof(text), "%u / %u bits   %u %s", (unsigned)filled,
-                       (unsigned)needed, count, coin ? "flips" : "rolls");
+                       (unsigned)target, count, m->plural);
     if (res > 0 && (size_t)res < sizeof(text)) lv_label_set_text(m->counts, text);
 
     if (m->rate) {
         const unsigned hundredths = (m->rate_milli + 5u) / 10u; // 1.67 for a d6
         char           line[48];
         int            rb = snprintf(line, sizeof(line), "%u.%02u bits/%s", hundredths / 100u,
-                          hundredths % 100u, coin ? "flip" : "roll");
+                          hundredths % 100u, m->singular);
         if (rb > 0 && (size_t)rb < sizeof(line)) lv_label_set_text(m->rate, line);
 
         unsigned long left = 0;
-        if (m->rate_milli > 0 && filled < needed) {
-            left = (unsigned long)(needed - filled) * 1000ul / m->rate_milli;
+        if (m->rate_milli > 0 && filled < target) {
+            left = (unsigned long)(target - filled) * 1000ul / m->rate_milli;
         }
         char est[32];
-        int  rt = snprintf(est, sizeof(est), "~%lu %s left", left, coin ? "flips" : "rolls");
+        int  rt = snprintf(est, sizeof(est), "~%lu %s left", left, m->plural);
         if (rt > 0 && (size_t)rt < sizeof(est)) lv_label_set_text(m->togo, est);
     }
 
-    char face[8];
-    if (coin)
-        snprintf(face, sizeof(face), "%c", last_roll == 1 ? 'H' : 'T');
-    else
-        snprintf(face, sizeof(face), "%u", last_roll);
-
-    // Both show the bits the newest roll produced.
+    // Both show the bits the newest input produced.
     bitvis_roll_set(&m->roll, face, bytes, filled, last_bits);
     bitvis_grid_set(&m->grid, bytes, filled, filled - last_bits);
 }
@@ -850,7 +790,8 @@ void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_
     ui_add_title(s, "Dice Rolls");
 
     lv_obj_t* panel = meter_panel_create(s);
-    meter_create(&dice_meter, panel, s, total_bits, sides, "Roll the die, tap the result");
+    meter_create(&dice_meter, panel, s, total_bits, roll_max_bits(sides), roll_rate_milli(sides),
+                 "roll", "rolls", "Roll the die, tap the result");
 
     // Face buttons, wrapped into a scrollable grid just above the footer.
     lv_obj_t* grid = lv_obj_create(s);
@@ -888,7 +829,9 @@ void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_
 void ui_dice_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
                           uint32_t needed, unsigned last_roll, uint32_t last_bits) {
     ASSERT_OR_DIE(bytes, "null bytes");
-    meter_set(&dice_meter, bytes, count, filled_bits, needed, last_roll, last_bits, false);
+    char face[8];
+    snprintf(face, sizeof(face), "%u", last_roll);
+    meter_set(&dice_meter, bytes, count, filled_bits, needed, face, last_bits);
 }
 
 /* -- Coin flip entropy ----------------------------------------------- */
@@ -913,7 +856,8 @@ void ui_show_coin(uint32_t total_bits, ui_uint_cb_t on_flip, ui_cb_t on_help, ui
     ui_add_title(s, "Coin Flips");
 
     lv_obj_t* panel = meter_panel_create(s);
-    meter_create(&coin_meter, panel, s, total_bits, 2, "Flip a coin, tap the result"); // a d2
+    meter_create(&coin_meter, panel, s, total_bits, 1, 1000, "flip", "flips",
+                 "Flip a coin, tap the result");
 
     ui_add_btn_evt(s, "Heads", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, -95, 40);
     ui_add_btn_evt(s, "Tails", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, 95, 40);
@@ -927,7 +871,8 @@ void ui_show_coin(uint32_t total_bits, ui_uint_cb_t on_flip, ui_cb_t on_help, ui
 void ui_coin_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
                           uint32_t needed, unsigned last_roll, uint32_t last_bits) {
     ASSERT_OR_DIE(bytes, "null bytes");
-    meter_set(&coin_meter, bytes, count, filled_bits, needed, last_roll, last_bits, true);
+    char face[2] = {(last_roll == 1) ? 'H' : 'T', '\0'};
+    meter_set(&coin_meter, bytes, count, filled_bits, needed, face, last_bits);
 }
 
 /* -- How rolls become bits (help) ------------------------------------- */
@@ -1055,6 +1000,281 @@ void ui_show_roll_help(ui_cb_t on_close) {
               "the one bit from roll 6 (highlighted) joins the two roll 3 gave - the rest is"
               " still to come",
               12, 0x888888);
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
+}
+
+/* -- Touch screen entropy (a tap is worth whole bits) ------------------ */
+// The screen is read as an 8x8 grid of tiles, so a tap is worth whole bits and
+// those bits can be drawn. It sits here because it reuses the entropy meter and
+// the help helpers above.
+static lv_obj_t*     touch_tiles[TOUCH_TILES_PER_AXIS * TOUCH_TILES_PER_AXIS];
+static lv_obj_t*     touch_area        = NULL;
+static lv_obj_t*     touch_instruction = NULL;
+static lv_obj_t*     touch_seed_box    = NULL;
+static lv_obj_t*     touch_seed_btn    = NULL;
+static bitvis_grid_t touch_seed_grid;
+
+// Nulls whichever pointer the deleted widget was stored in.
+static void touch_widget_delete_cb(lv_event_t* e) {
+    lv_obj_t** slot = lv_event_get_user_data(e);
+    if (slot) *slot = NULL;
+}
+
+static void touch_area_tap_cb(lv_event_t* e) {
+    union {
+        ui_tap_cb_t fn;
+        void*       vp;
+    } u;
+    u.vp = lv_event_get_user_data(e);
+    if (!u.fn) return;
+
+    lv_indev_t* indev = lv_event_get_indev(e);
+    if (!indev) return;
+    if (lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    u.fn(p.x, p.y);
+}
+
+// Light the tile the newest tap landed in, so the grid the bits come from is
+// something you can see rather than something you are told about.
+static void touch_light_tile(unsigned tile) {
+    const unsigned n = TOUCH_TILES_PER_AXIS * TOUCH_TILES_PER_AXIS;
+    for (unsigned i = 0; i < n; i++) {
+        if (!touch_tiles[i]) continue;
+        if (i == tile) {
+            lv_obj_set_style_bg_color(touch_tiles[i], lv_color_hex(UI_COLOR_SEED_GREEN), 0);
+            lv_obj_set_style_bg_opa(touch_tiles[i], LV_OPA_30, 0);
+        } else {
+            lv_obj_set_style_bg_opa(touch_tiles[i], LV_OPA_TRANSP, 0);
+        }
+    }
+}
+
+void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel, ui_cb_t on_help,
+                          ui_cb_t on_continue, uint32_t target_bits) {
+    ASSERT_OR_DIE(on_tap, "null on_tap");
+    ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ASSERT_OR_DIE(on_continue, "null on_continue");
+    ASSERT_OR_DIE(target_bits % 16u == 0, "touch target must halve into whole bytes");
+
+    memset(touch_tiles, 0, sizeof(touch_tiles));
+
+    lv_obj_t* s = ui_make_screen();
+
+    // Full-screen touch target; every widget above it is non-clickable, so a tap
+    // anywhere still counts unless it lands on Help or the hold-to-cancel button.
+    lv_obj_t* area = lv_obj_create(s);
+    touch_area     = area;
+    lv_obj_add_event_cb(area, touch_widget_delete_cb, LV_EVENT_DELETE, &touch_area);
+    lv_obj_set_size(area, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(area, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(area, lv_color_hex(0x0a0a0a), 0);
+    lv_obj_set_style_border_width(area, 0, 0);
+    lv_obj_set_style_pad_all(area, 0, 0);
+    lv_obj_add_flag(area, LV_OBJ_FLAG_CLICKABLE);
+    union {
+        ui_tap_cb_t fn;
+        void*       vp;
+    } u = {.fn = on_tap};
+    lv_obj_add_event_cb(area, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+
+    ui_add_title(area, "Touch Screen");
+
+    // The tiles the collector reads, drawn at the size the collector uses.
+    lv_display_t*    disp = lv_display_get_default();
+    const lv_coord_t tw =
+        (lv_coord_t)(lv_display_get_horizontal_resolution(disp) / (int32_t)TOUCH_TILES_PER_AXIS);
+    const lv_coord_t th =
+        (lv_coord_t)(lv_display_get_vertical_resolution(disp) / (int32_t)TOUCH_TILES_PER_AXIS);
+    for (unsigned row = 0; row < TOUCH_TILES_PER_AXIS; row++) {
+        for (unsigned col = 0; col < TOUCH_TILES_PER_AXIS; col++) {
+            lv_obj_t* tile = lv_obj_create(area);
+            lv_obj_set_size(tile, tw, th);
+            lv_obj_set_pos(tile, (lv_coord_t)col * tw, (lv_coord_t)row * th);
+            lv_obj_set_style_pad_all(tile, 0, 0);
+            lv_obj_set_style_radius(tile, 0, 0);
+            lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(tile, 1, 0);
+            lv_obj_set_style_border_color(tile, lv_color_hex(0x2a2a2a), 0);
+            ui_clickthrough(tile); // the tap has to reach the screen behind
+            touch_tiles[row * TOUCH_TILES_PER_AXIS + col] = tile;
+        }
+    }
+
+    lv_obj_t* panel = meter_panel_create(area);
+    meter_create(&touch_meter, panel, s, target_bits, TOUCH_BITS_PER_TAP,
+                 TOUCH_BITS_PER_TAP * 1000u, "tap", "taps", "Tap the tiles to collect bits");
+    // A tap that lands on the meter counts like any other: the panel hands its
+    // clicks over, so neither the grid nor its box can swallow a tap.
+    lv_obj_add_event_cb(panel, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+
+    touch_instruction = lv_label_create(area);
+    lv_obj_add_event_cb(touch_instruction, touch_widget_delete_cb, LV_EVENT_DELETE,
+                        &touch_instruction);
+    lv_label_set_text(touch_instruction, "the tile you hit becomes 6 bits");
+    lv_obj_set_style_text_color(touch_instruction, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(touch_instruction, ui_font(12), 0);
+    lv_obj_align(touch_instruction, LV_ALIGN_BOTTOM_MID, 0, ui_scale(-46));
+
+    // The finish: the tapped bits stay where they are and the seed they hash to
+    // appears below them, so the two can be compared before continuing.
+    touch_seed_box = lv_obj_create(area);
+    lv_obj_add_event_cb(touch_seed_box, touch_widget_delete_cb, LV_EVENT_DELETE, &touch_seed_box);
+    ui_clickthrough(touch_seed_box);
+    lv_obj_set_size(touch_seed_box, ui_scale(440), LV_SIZE_CONTENT);
+    lv_obj_align(touch_seed_box, LV_ALIGN_TOP_MID, 0, ui_scale(162));
+    lv_obj_set_style_bg_opa(touch_seed_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(touch_seed_box, 0, 0);
+    lv_obj_set_style_pad_all(touch_seed_box, 0, 0);
+    lv_obj_set_flex_flow(touch_seed_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(touch_seed_box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    {
+        lv_obj_t* cap = lv_label_create(touch_seed_box);
+        lv_label_set_text(cap, "hashed into the seed");
+        lv_obj_set_style_text_color(cap, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(cap, ui_font(12), 0);
+    }
+    bitvis_grid_create(&touch_seed_grid, touch_seed_box, s, target_bits / 2u);
+
+    touch_seed_btn =
+        ui_add_btn(area, "Continue", on_continue, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_add_flag(touch_seed_box, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(touch_seed_btn, LV_OBJ_FLAG_HIDDEN);
+
+    // Help and Cancel are both holds: a short tap on either collects entropy
+    // like anywhere else on the screen, so neither steals a tap.
+    if (on_help) {
+        lv_obj_t* help_btn = lv_button_create(area);
+        lv_obj_set_size(help_btn, ui_scale(110), ui_scale(30));
+        lv_obj_align(help_btn, LV_ALIGN_BOTTOM_LEFT, 10, -8);
+        lv_obj_add_event_cb(help_btn, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+        union {
+            ui_cb_t fn;
+            void*   vp;
+        } u_help = {.fn = on_help};
+        lv_obj_add_event_cb(help_btn, ui_btn_invoke, LV_EVENT_LONG_PRESSED, u_help.vp);
+        lv_obj_t* help_lbl = lv_label_create(help_btn);
+        lv_label_set_text(help_lbl, "Help (hold)");
+        lv_obj_set_style_text_font(help_lbl, ui_font(12), 0);
+        lv_obj_center(help_lbl);
+    }
+
+    lv_obj_t* cancel_btn = lv_button_create(area);
+    lv_obj_set_size(cancel_btn, ui_scale(110), ui_scale(30));
+    lv_obj_align(cancel_btn, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
+    lv_obj_add_event_cb(cancel_btn, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+    union {
+        ui_cb_t fn;
+        void*   vp;
+    } u_cancel = {.fn = on_cancel};
+    lv_obj_add_event_cb(cancel_btn, ui_btn_invoke, LV_EVENT_LONG_PRESSED, u_cancel.vp);
+    lv_obj_t* cancel_lbl = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_lbl, "Cancel (hold)");
+    lv_obj_set_style_text_font(cancel_lbl, ui_font(12), 0);
+    lv_obj_center(cancel_lbl);
+
+    ui_swap_screen(s);
+}
+
+void ui_touch_screen_set_progress(const uint8_t* bytes, uint32_t bits, uint32_t target_bits,
+                                  unsigned taps, unsigned last_tile) {
+    ASSERT_OR_DIE(bytes, "null bytes");
+    char face[8];
+    snprintf(face, sizeof(face), "%u", last_tile); // the tile's number, 0..63
+    meter_set(&touch_meter, bytes, taps, bits, target_bits, face, TOUCH_BITS_PER_TAP);
+    touch_light_tile(last_tile);
+}
+
+void ui_touch_screen_show_seed(const uint8_t* seed, size_t seed_len) {
+    ASSERT_OR_DIE(seed, "null seed");
+    if (seed_len == 0 || seed_len > 32) return;
+
+    // Collecting is over: the screen stops taking taps, so a tap on the finish
+    // view cannot be mistaken for more entropy.
+    if (touch_area) {
+        lv_obj_remove_event_cb(touch_area, touch_area_tap_cb);
+        ui_clickthrough(touch_area);
+    }
+
+    // The tiles have done their job; the tapped bits stay visible above the seed.
+    const unsigned n = TOUCH_TILES_PER_AXIS * TOUCH_TILES_PER_AXIS;
+    for (unsigned i = 0; i < n; i++) {
+        if (touch_tiles[i]) lv_obj_add_flag(touch_tiles[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (touch_instruction) lv_obj_add_flag(touch_instruction, LV_OBJ_FLAG_HIDDEN);
+    if (touch_seed_box) {
+        bitvis_grid_set(&touch_seed_grid, seed, (uint32_t)seed_len * 8u, 0);
+        lv_obj_remove_flag(touch_seed_box, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (touch_seed_btn) lv_obj_remove_flag(touch_seed_btn, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* -- Taps to bits (touch help) ----------------------------------------- */
+static bitvis_roll_t help_tile; // a tile's number and the bits it is worth
+
+void ui_show_touch_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Taps to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, ui_scale(440), h);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not 0x111111: the bitvis diagrams are opaque RGB565 with black
+    // backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    // 1. The tiles are the input, which is what makes the bits whole.
+    help_section(cont, "The screen is a grid of tiles",
+                 "It is read as 8 by 8 tiles - 64 of them - and the tile a tap lands in is"
+                 " written as its number in six bits, so every tap is worth whole bits with no"
+                 " fraction left over. The lit square shows the tile just hit.");
+    bitvis_roll_create(&help_tile, cont, s, TOUCH_BITS_PER_TAP);
+    {
+        // Tile 13 -> 001101, the six top bits of 0x34.
+        const uint8_t example[1] = {0x34};
+        bitvis_roll_set(&help_tile, "13", example, 6, 6);
+    }
+    help_text(cont,
+              "tile 13 -> 001101: a tap in the top left corner writes 000000 and one in the"
+              " bottom right 111111.",
+              12, 0x888888);
+
+    // 2. The bits land in the grid as they come.
+    help_section(cont, "The bits fill the grid",
+                 "They fill it from the front, most significant bit first. Six bits land per"
+                 " tap and none are held back, so the grid is exactly what the taps have"
+                 " produced - at this point nothing has been hashed.");
+
+    // 3. Then it is hashed into the seed.
+    help_section(cont, "Then it is hashed into the seed",
+                 "A hand is not uniform over the screen and one tap is not independent of the"
+                 " last, so the tapped bits are hashed with SHA-256 to make the seed, and only"
+                 " half of them are assumed to carry anything. A 128-bit seed therefore takes"
+                 " 256 tapped bits, which is 43 taps; a 24-word seed takes 512, which is 86."
+                 " The screen shows both at the end.");
+
+    // 4. The one thing no hash can fix.
+    help_section(cont, "Tap at random",
+                 "Spreading taps over the whole grid is what makes them worth six bits each."
+                 " A pattern - the same tile, a row, a diagonal - has far less entropy than it"
+                 " looks, and hashing cannot put back what was never there.");
 
     ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
@@ -1301,7 +1521,7 @@ void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_
     ASSERT_OR_DIE(title, "null title");
 
     /* Scanning an image file is only offered where the platform can do it
-     * (desktop and browser builds).  Its button sits next to Cancel, which
+     * (desktop and browser builds). Its button sits next to Cancel, which
      * costs a button row, so the live preview shrinks to make room. */
     bool have_file_btn = on_open_file && hal_file_image_available();
 

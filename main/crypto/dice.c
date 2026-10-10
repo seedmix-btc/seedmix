@@ -28,15 +28,15 @@ static void dice_append_bit(dice_entropy_t* d, unsigned bit) {
 
 /* Faces are taken in power-of-two parts, largest first, which is just the die
  * rewritten as a sum of power-of-two dice: a d6 is a d4 plus a coin, a d12 is a
- * d8 plus a d4, a d20 is a d16 plus a d4.  A part of 2^k faces is worth k bits
+ * d8 plus a d4, a d20 is a d16 plus a d4. A part of 2^k faces is worth k bits
  * written as the face's offset within that part, and the faces above it are
  * worth whatever the same rule makes of the remainder.
  *
  * Where the interval method got log2(sides) bits per roll by carrying the
  * fraction, this pays whole bits immediately and drops the rest: a d6 averages
- * 2*(4/6) + 1*(2/6) = 1.67 bits per roll rather than 2.58.  The bits that do
+ * 2*(4/6) + 1*(2/6) = 1.67 bits per roll rather than 2.58. The bits that do
  * come out are still uniform and independent, so a seed has exactly as much
- * entropy as it has bits - it just takes more rolls to fill.  A single leftover
+ * entropy as it has bits - it just takes more rolls to fill. A single leftover
  * face (d3, d5, and the last face of every odd die) is worth nothing at all.
  *
  * Iterative rather than recursive: the remainder is smaller than the part just

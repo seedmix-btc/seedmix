@@ -28,7 +28,7 @@ void      ui_swap_screen(lv_obj_t* new_scr);
 
 /**
  * Scale a pixel value laid out against the 480x320 reference resolution to
- * the active display.  The scale is uniform (limited by the shorter axis) so
+ * the active display. The scale is uniform (limited by the shorter axis) so
  * screens keep their proportions and fit on any panel.
  */
 lv_coord_t ui_scale(lv_coord_t n);
@@ -41,14 +41,14 @@ const lv_font_t* ui_font(uint8_t px);
 
 /**
  * True when the active display is a small (embedded) panel, e.g. the TTGO
- * T-Display's 240x135.  Used to switch layouts (fewer columns, arrow
+ * T-Display's 240x135. Used to switch layouts (fewer columns, arrow
  * controls) that only make sense when space is tight.
  */
 bool ui_small_screen(void);
 
 /**
  * Create an up/down arrow button pair that scrolls @p target vertically by
- * @p step pixels per press.  Returns the container holding both buttons; the
+ * @p step pixels per press. Returns the container holding both buttons; the
  * caller positions it (typically lv_obj_align_to(... LV_ALIGN_OUT_RIGHT_MID
  * ...)).  @p target must have vertical scrolling enabled.
  */
@@ -56,14 +56,14 @@ lv_obj_t* ui_add_scroll_arrows(lv_obj_t* parent, lv_obj_t* target, lv_coord_t st
 
 /**
  * Rebuild the shared navigation group from the focusable widgets on @p scr
- * and focus the first one.  No-op when no navigation input device has been
+ * and focus the first one. No-op when no navigation input device has been
  * attached (e.g. on desktop builds).
  */
 void ui_nav_build(lv_obj_t* scr);
 
 /**
  * Add a focusable widget to the shared navigation group without rebuilding
- * the whole screen.  No-op when no navigation input
+ * the whole screen. No-op when no navigation input
  * device has been attached.
  */
 void ui_nav_add_obj(lv_obj_t* obj);
@@ -71,6 +71,14 @@ void ui_nav_add_obj(lv_obj_t* obj);
 /** Create a button with a plain void(void) callback. */
 lv_obj_t* ui_add_btn(lv_obj_t* parent, const char* text, ui_cb_t cb, ui_btn_size_t size,
                      lv_align_t align, lv_coord_t x_ofs, lv_coord_t y_ofs);
+
+/**
+ * Let taps and clicks pass through @p obj to whatever is behind it.
+ *
+ * A plain lv_obj takes clicks by default (lv_image and lv_label do not), so any
+ * decoration laid over a screen that collects input has to opt out.
+ */
+void ui_clickthrough(lv_obj_t* obj);
 
 /** Create a button with an LVGL event callback (and optional user_data). */
 lv_obj_t* ui_add_btn_evt(lv_obj_t* parent, const char* text, lv_event_cb_t evt_cb, void* user_data,

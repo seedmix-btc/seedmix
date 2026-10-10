@@ -57,7 +57,7 @@ static void test_partial_last_roll_is_dropped(void) {
 
 static void test_d6_splits_into_a_d4_and_a_coin(void) {
     // Faces are taken in power-of-two parts, largest first: a d6 is a d4 plus a
-    // coin.  Faces 1..4 are therefore worth 2 bits (v - 1, exactly like a d4)
+    // coin. Faces 1..4 are therefore worth 2 bits (v - 1, exactly like a d4)
     // and 5, 6 are worth 1 bit each.
     dice_entropy_t* d      = dice_entropy_begin(12, 6);
     const unsigned  low[4] = {1, 2, 3, 4}; // 00 01 10 11
@@ -92,7 +92,7 @@ static void test_d12_splits_into_a_d8_and_a_d4(void) {
 
 static void test_odd_die_leftover_face_gives_nothing(void) {
     // 3 = 2 + 1: faces 1 and 2 are a coin and face 3 has no part of its own, so
-    // it adds no bits at all.  Every odd die has such a face; the offered dice
+    // it adds no bits at all. Every odd die has such a face; the offered dice
     // (6, 10, 12, 20) do not, because each remainder is itself a power of two.
     dice_entropy_t* d = dice_entropy_begin(12, 3);
     dice_entropy_add_roll(d, 1);
@@ -125,7 +125,7 @@ static void test_roll_bits_is_what_a_roll_adds(void) {
 
 static void test_split_rates_match_the_rule(void) {
     // Whole bits per roll, but fewer of them than log2(sides): that is the price
-    // of never carrying a fraction.  Pooled over 20 seeds per die, since one
+    // of never carrying a fraction. Pooled over 20 seeds per die, since one
     // seed is only ~70-160 rolls and the per-roll count varies.
     const unsigned sides[4]  = {6, 10, 12, 20};
     const double   expect[4] = {1.6667, 2.6000, 2.6667, 3.6000};
@@ -149,7 +149,7 @@ static void test_split_rates_match_the_rule(void) {
 
 static void test_help_screen_example(void) {
     // The worked example in the dice help screen: a d6 showing 3, then 6, then 5
-    // releases 2, then 1, then 1 bits (the seed starts 1010).  If this changes
+    // releases 2, then 1, then 1 bits (the seed starts 1010). If this changes
     // the help text and its diagrams need updating too.
     dice_entropy_t* d = dice_entropy_begin(24, 6);
 
@@ -171,7 +171,7 @@ static void test_help_screen_example(void) {
 
 static void test_batched_dice_reach_ready(void) {
     // A d6 pays 1.67 bits a roll, so 128 bits takes ~77 rolls - it would be ~50
-    // if the fraction were carried.  The split must not be worse than its rate.
+    // if the fraction were carried. The split must not be worse than its rate.
     dice_entropy_t* d = dice_entropy_begin(12, 6);
     uint32_t        s = 12345u;
     unsigned        i = 0;

@@ -103,15 +103,15 @@ static void test_dice_derive_buffer_too_small(void) {
     TEST_ASSERT_FATAL(dice_entropy_derive(d, out, sizeof(out)));
 }
 
-static void test_touch_accumulator_overflow(void) {
-    touch_entropy_t* t = touch_entropy_begin(12, 480, 320); /* cap = 32 taps */
-    for (unsigned i = 0; i < 32; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
+static void test_touch_already_complete(void) {
+    touch_entropy_t* t = touch_entropy_begin(12, 480, 320); /* ready after 43 taps */
+    for (unsigned i = 0; i < 43; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
     TEST_ASSERT_FATAL(touch_entropy_add_tap(t, 1, 1));
 }
 
 static void test_touch_derive_buffer_too_small(void) {
     touch_entropy_t* t = touch_entropy_begin(12, 480, 320);
-    for (unsigned i = 0; i < 32; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
+    for (unsigned i = 0; i < 43; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
     uint8_t out[8] = {0};
     TEST_ASSERT_FATAL(touch_entropy_derive(t, out, sizeof(out)));
 }
@@ -159,7 +159,7 @@ int main(void) {
     RUN_TEST(test_word_count_bits_invalid);
     RUN_TEST(test_dice_accumulator_overflow);
     RUN_TEST(test_dice_derive_buffer_too_small);
-    RUN_TEST(test_touch_accumulator_overflow);
+    RUN_TEST(test_touch_already_complete);
     RUN_TEST(test_touch_derive_buffer_too_small);
     RUN_TEST(test_mnemonic_from_entropy_invalid_length);
     RUN_TEST(test_mnemonic_combine_self);

@@ -3,7 +3,7 @@
  * @brief Bit-level visualisations (see bitvis.h).
  *
  * Each value is drawn as a grid of byte blocks, every block showing its two
- * hex digits above its eight bits, and a timer walks one bit per tick.  The
+ * hex digits above its eight bits, and a timer walks one bit per tick. The
  * XOR view draws A, B and A ^ B; the entropy view draws a single value whose
  * bits fill in as the scan passes them.
  *
@@ -21,7 +21,7 @@
 #include "util/error.h"
 #include "util/utils.h"
 
-/* Hex glyphs, 3 columns x 5 rows.  In each row bit 0 is the left column. */
+/* Hex glyphs, 3 columns x 5 rows. In each row bit 0 is the left column. */
 static const uint8_t s_xv_glyph[16][5] = {
     {7, 5, 5, 5, 7}, {2, 3, 2, 2, 7}, {7, 4, 7, 1, 7}, {7, 4, 7, 4, 7},
     {5, 5, 7, 4, 4}, {7, 1, 7, 4, 7}, {7, 1, 7, 5, 7}, {7, 4, 4, 4, 4},
@@ -54,7 +54,7 @@ static const uint8_t* xv_glyph(char c) {
 #define XV_HEX_CUR 0xFFFFu // white: value of the byte being scanned
 
 #define XV_OPERANDS 3   // A, B and the result
-#define XV_MAX_BYTES 32 // 24 words -> 32 bytes
+#define XV_MAX_BYTES 64 // the widest view: a 256-bit seed, or 512 tapped bits
 #define XV_TICK_MS 25u
 #define XV_HOLD_TICKS 24 // linger on the finished result
 #define XV_BIT_Y 8       // 1 px top margin + 5 px label + 2 px gap
@@ -321,7 +321,7 @@ static void xv_metrics(lv_coord_t* cols, lv_coord_t* block_w, lv_coord_t* cell, 
 }
 
 /* Shared builder: @p n_ops grids of @p elen bytes, labelled by @p names (NULL
- * for none).  The bits of operand @p reveal_op are revealed by the scan when
+ * for none). The bits of operand @p reveal_op are revealed by the scan when
  * @p animate is set; otherwise the caller pushes them with bitvis_grid_set().
  * When @p check is set every revealed bit must be the XOR of the first two
  * operands.  @p owner (optional) is cleared when the screen goes away. */
@@ -366,6 +366,7 @@ static xorview_t* xv_build(lv_obj_t* parent, lv_obj_t* screen, uint8_t elen, uin
     }
 
     lv_obj_t* vis = lv_obj_create(parent);
+    ui_clickthrough(vis); // a bit view never takes a tap, its box included
     lv_obj_set_width(vis, LV_PCT(100));
     lv_obj_set_height(vis, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_opa(vis, LV_OPA_TRANSP, 0);
@@ -393,6 +394,7 @@ static xorview_t* xv_build(lv_obj_t* parent, lv_obj_t* screen, uint8_t elen, uin
         v->dsc[i].data          = (const uint8_t*)v->buf[i];
 
         lv_obj_t* img = lv_image_create(vis);
+        ui_clickthrough(img); // a bit view never takes a tap
         lv_image_set_src(img, &v->dsc[i]);
         lv_obj_set_size(img, v->w, v->h); // 1:1, the buffer is already sized
         v->imgs[i] = img;
@@ -469,7 +471,7 @@ void bitvis_grid_set(bitvis_grid_t* g, const uint8_t* bytes, uint32_t filled_bit
 /* -- Last-roll readout ------------------------------------------------- */
 
 /* One grid block's worth of chrome for the newest roll: a label where a byte
- * block shows its hex, and the bits the roll produced below it.  Same metrics,
+ * block shows its hex, and the bits the roll produced below it. Same metrics,
  * colours and font as the grid, so it reads as a block of the same visual. */
 typedef struct {
     bitvis_roll_t* owner;
@@ -540,6 +542,7 @@ void bitvis_roll_create(bitvis_roll_t* h, lv_obj_t* parent, lv_obj_t* screen, un
     xrv_chrome(r);
 
     r->img = lv_image_create(parent);
+    ui_clickthrough(r->img); // a bit view never takes a tap
     lv_image_set_src(r->img, &r->dsc);
     lv_obj_set_size(r->img, r->w, r->h); // 1:1, the buffer is already sized
 

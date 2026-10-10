@@ -33,7 +33,7 @@ static unsigned    word_count  = 12;
 static qr_grid_t   exported_qr = {0};
 
 /* -- Forward declarations --------------------------------------------- */
-/* Where a decoded QR payload came from.  The camera keeps streaming, so a
+/* Where a decoded QR payload came from. The camera keeps streaming, so a
  * payload the screen cannot use is quietly passed over; a file is read once,
  * so the screen says so instead. */
 typedef enum {
@@ -76,6 +76,9 @@ static void on_dice_help(void);
 static void on_coin_help(void);
 static void on_touch_screen(void);
 static void on_touch_tap(lv_coord_t x, lv_coord_t y);
+static void on_touch_cancel(void);
+static void on_touch_help(void);
+static void on_touch_continue(void);
 static void on_show_state(void);
 static void go_back_source(void);
 static void go_source(void);
@@ -356,9 +359,9 @@ static const char* camera_pixfmt_name(hal_camera_pixfmt_t f) {
     }
 }
 
-/* Hand a decoded payload to the active scan callback.  The camera sees the same
+/* Hand a decoded payload to the active scan callback. The camera sees the same
  * QR code in every frame, so a repeat of the last payload is dropped - a file
- * playing an animation repeats frames the same way.  Returns whether the
+ * playing an animation repeats frames the same way. Returns whether the
  * payload belonged to the screen being scanned. */
 static bool qr_scan_deliver(qr_source_t source, const uint8_t* payload, size_t plen) {
     bool dup = qr_scan_last && qr_scan_last_len == plen && memcmp(qr_scan_last, payload, plen) == 0;
@@ -559,7 +562,7 @@ static void qr_scan_screen_show(void) {
 /*
  * A payload the screen cannot use - or a file holding no readable QR code at
  * all - is worth more than a line of small print: the message takes over the
- * screen for a moment and the scan then carries on where it left off.  The
+ * screen for a moment and the scan then carries on where it left off. The
  * camera session, the multi-part UR decoder and the feed timer all stay as they
  * are; the timer only skips its work while the message is up, because the
  * widgets it draws into belong to the screen that was replaced.
@@ -634,9 +637,9 @@ static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t
 /*
  * The desktop and browser builds can load a QR code from an image file (a
  * screenshot exported by another wallet, a photo of a printed SeedQR, ...)
- * instead of pointing the camera at it.  The platform decodes the picked file
+ * instead of pointing the camera at it. The platform decodes the picked file
  * and hands back grayscale frames, which then take the very same
- * decode/dispatch path as a camera frame.  An animated GIF arrives one frame at
+ * decode/dispatch path as a camera frame. An animated GIF arrives one frame at
  * a time, so an animated multi-part UR collects its parts just as it would from
  * the camera.
  */
@@ -694,10 +697,10 @@ static tx_inspect_t*      inspected   = NULL;
 static ur_psbt_decoder_t* ur_decoder  = NULL;
 static descriptor_t*      wallet_desc = NULL;
 
-/* Network the scanned payload is interpreted as.  A transaction does not say
+/* Network the scanned payload is interpreted as. A transaction does not say
  * which network it belongs to: the same output script is spendable on mainnet
- * and on testnet alike, and only the address encoding differs.  The user picks
- * it before scanning, and it decides how addresses are rendered.  The order
+ * and on testnet alike, and only the address encoding differs. The user picks
+ * it before scanning, and it decides how addresses are rendered. The order
  * must match tx_inspect_network_t. */
 static const char* const TX_NETWORKS[] = {"Mainnet", "Testnet", "Signet", "Regtest"};
 #define TX_NETWORK_COUNT (sizeof(TX_NETWORKS) / sizeof(TX_NETWORKS[0]))
@@ -1138,27 +1141,51 @@ static void on_coin_flips(void) {
 
 /* -- Touch screen entropy source -------------------------------------- */
 static touch_entropy_t* touch = NULL;
+static uint8_t          touch_seed[32];
+static size_t           touch_seed_len = 0;
+
+// Rebuild the touch screen from the live session: after a help round trip, and
+// when the seed has already been derived it shows the finish view again.
+static void show_touch_screen(void) {
+    ASSERT_OR_DIE(touch, "no active touch session");
+    ui_show_touch_screen(on_touch_tap, on_touch_cancel, on_touch_help, on_touch_continue,
+                         touch_entropy_target_bits(touch));
+    if (touch_seed_len > 0) {
+        ui_touch_screen_show_seed(touch_seed, touch_seed_len);
+    } else if (touch_entropy_taps(touch) > 0) {
+        ui_touch_screen_set_progress(touch_entropy_bytes(touch), touch_entropy_bits(touch),
+                                     touch_entropy_target_bits(touch), touch_entropy_taps(touch),
+                                     touch_entropy_last_tile(touch));
+    }
+}
 
 static void on_touch_tap(lv_coord_t x, lv_coord_t y) {
     ASSERT_OR_DIE(touch, "no active touch session");
+    if (touch_seed_len > 0) return;
     touch_entropy_add_tap(touch, x, y);
 
     if (!touch_entropy_ready(touch)) {
-        char status[64];
-        int  res =
-            snprintf(status, sizeof(status), "Entropy: %u / %u bits",
-                     (unsigned)touch_entropy_bits(touch), (unsigned)touch_entropy_needed(touch));
-        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(status), "status string too long");
-        ui_touch_screen_set_status(status);
+        ui_touch_screen_set_progress(touch_entropy_bytes(touch), touch_entropy_bits(touch),
+                                     touch_entropy_target_bits(touch), touch_entropy_taps(touch),
+                                     touch_entropy_last_tile(touch));
         return;
     }
 
-    unsigned taps = touch_entropy_taps(touch);
-    uint8_t  entropy[32];
-    size_t   elen = touch_entropy_derive(touch, entropy, sizeof(entropy));
-    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
+    // Enough tapped bits: hash them, and show the seed beside them before moving
+    // on, so what the taps became is visible.
+    touch_seed_len = touch_entropy_derive(touch, touch_seed, sizeof(touch_seed));
+    ASSERT_OR_DIE(touch_seed_len == 16 || touch_seed_len == 32, "unexpected entropy length");
+    ui_touch_screen_show_seed(touch_seed, touch_seed_len);
+}
+
+static void on_touch_continue(void) {
+    ASSERT_OR_DIE(touch, "no active touch session");
+    ASSERT_OR_DIE(touch_seed_len == 16 || touch_seed_len == 32, "no touch seed to use");
+    const unsigned taps = touch_entropy_taps(touch);
+
+    mnemonic_t* m = mnemonic_from_entropy(touch_seed, touch_seed_len);
+    secure_memzero(touch_seed, sizeof(touch_seed));
+    touch_seed_len = 0;
     touch_entropy_discard(touch);
     touch = NULL;
 
@@ -1168,11 +1195,17 @@ static void on_touch_tap(lv_coord_t x, lv_coord_t y) {
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }
 
+static void on_touch_help_close(void) { show_touch_screen(); }
+
+static void on_touch_help(void) { ui_show_touch_help(on_touch_help_close); }
+
 static void on_touch_cancel(void) {
     if (touch) {
         touch_entropy_discard(touch);
         touch = NULL;
     }
+    secure_memzero(touch_seed, sizeof(touch_seed));
+    touch_seed_len = 0;
     go_source();
 }
 
@@ -1183,8 +1216,9 @@ static void on_touch_screen(void) {
     uint32_t      res_x = (uint32_t)lv_display_get_horizontal_resolution(disp);
     uint32_t      res_y = (uint32_t)lv_display_get_vertical_resolution(disp);
 
-    touch = touch_entropy_begin(word_count, res_x, res_y);
-    ui_show_touch_screen(on_touch_tap, on_touch_cancel);
+    touch          = touch_entropy_begin(word_count, res_x, res_y);
+    touch_seed_len = 0;
+    show_touch_screen();
 }
 
 static void on_we_complete(void) {
