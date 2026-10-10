@@ -12,6 +12,12 @@ endif()
 # Build just the unity library (Unity ships no test subdirectory of its own).
 add_subdirectory(${UNITY_DIR} ${CMAKE_BINARY_DIR}/unity)
 
+# Match IDF error behavior for format truncation (GCC only)
+set(SEEDMIX_FORMAT_FLAGS "")
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    set(SEEDMIX_FORMAT_FLAGS -Wformat-truncation=1 -Werror=format-truncation)
+endif()
+
 # -- Coverage instrumentation -----------------------------------------------
 # Instrument only the code under test (targets in this directory), not Unity
 # (vendored above) or libwally (built separately with autotools).
@@ -74,7 +80,7 @@ target_include_directories(seedmix_test_util PUBLIC
 target_link_libraries(seedmix_test_util PUBLIC libwally qrencode quirc)
 
 target_compile_options(seedmix_test_util PRIVATE
-    -Wall -Wextra -Wpedantic
+    -Wall -Wextra -Wpedantic ${SEEDMIX_FORMAT_FLAGS}
 )
 
 # -- Test executables (one per suite; each defines its own main()) -----------
@@ -88,6 +94,7 @@ function(seedmix_add_test name src)
         -Wall -Wextra -Wpedantic
         $<$<CONFIG:Debug>:-g -O0>
         $<$<CONFIG:Release>:-O2>
+        ${SEEDMIX_FORMAT_FLAGS}
     )
     add_test(NAME ${name} COMMAND ${name})
     set_property(GLOBAL APPEND PROPERTY SEEDMIX_TEST_EXECUTABLES ${name})

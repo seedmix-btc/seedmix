@@ -79,6 +79,12 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     $<$<CONFIG:Release>:-O2>
 )
 
+# Match IDF error behavior for format truncation (GCC only)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -Wformat-truncation=1 -Werror=format-truncation)
+endif()
+
 if(ENABLE_ASAN)
     target_compile_options(${PROJECT_NAME} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
     target_link_options(${PROJECT_NAME} PRIVATE -fsanitize=address)
