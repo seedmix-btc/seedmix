@@ -20,22 +20,22 @@ void tearDown(void) {}
 
 /* -- dice ---------------------------------------------------------------- */
 static void test_dice_begin_invalid_word_count(void) {
-    TEST_ASSERT_FATAL(dice_entropy_begin(11, 6));
-    TEST_ASSERT_FATAL(dice_entropy_begin(0, 6));
+    TEST_ASSERT_FATAL(dice_entropy_begin(11, 4));
+    TEST_ASSERT_FATAL(dice_entropy_begin(0, 4));
 }
 
 static void test_dice_begin_invalid_sides(void) {
     TEST_ASSERT_FATAL(dice_entropy_begin(12, 1));
-    TEST_ASSERT_FATAL(dice_entropy_begin(12, 256));
+    TEST_ASSERT_FATAL(dice_entropy_begin(12, 257));
 }
 
 static void test_dice_roll_above_range(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 6);
-    TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 7));
+    dice_entropy_t* d = dice_entropy_begin(12, 4);
+    TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 5));
 }
 
 static void test_dice_roll_below_range(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 6);
+    dice_entropy_t* d = dice_entropy_begin(12, 4);
     TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 0));
 }
 
@@ -89,35 +89,29 @@ static void test_mnemonic_combine_word_count_mismatch(void) {
 /* -- utils --------------------------------------------------------------- */
 static void test_word_count_bits_invalid(void) { TEST_ASSERT_FATAL(utils_word_count_bits(11)); }
 
-static void test_bytes_to_hex_buffer_too_small(void) {
-    const uint8_t data[4] = {0};
-    char          out[4]  = {0};
-    TEST_ASSERT_FATAL(bytes_to_hex(data, sizeof(data), out, sizeof(out)));
-}
-
 /* -- overflow / buffer-size / null guards -------------------------------- */
 static void test_dice_accumulator_overflow(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 2); /* cap = 128 rolls */
+    dice_entropy_t* d = dice_entropy_begin(12, 2); /* 1 bit per roll -> 128 rolls */
     for (unsigned i = 0; i < 128; i++) dice_entropy_add_roll(d, (i % 2) + 1);
     TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 1));
 }
 
 static void test_dice_derive_buffer_too_small(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 6);
-    for (unsigned i = 0; i < 64; i++) dice_entropy_add_roll(d, (i % 6) + 1);
+    dice_entropy_t* d = dice_entropy_begin(12, 4);
+    for (unsigned i = 0; i < 64; i++) dice_entropy_add_roll(d, (i % 4) + 1);
     uint8_t out[8] = {0};
     TEST_ASSERT_FATAL(dice_entropy_derive(d, out, sizeof(out)));
 }
 
-static void test_touch_accumulator_overflow(void) {
-    touch_entropy_t* t = touch_entropy_begin(12, 480, 320); /* cap = 32 taps */
-    for (unsigned i = 0; i < 32; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
+static void test_touch_already_complete(void) {
+    touch_entropy_t* t = touch_entropy_begin(12, 480, 320); /* ready after 43 taps */
+    for (unsigned i = 0; i < 43; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
     TEST_ASSERT_FATAL(touch_entropy_add_tap(t, 1, 1));
 }
 
 static void test_touch_derive_buffer_too_small(void) {
     touch_entropy_t* t = touch_entropy_begin(12, 480, 320);
-    for (unsigned i = 0; i < 32; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
+    for (unsigned i = 0; i < 43; i++) touch_entropy_add_tap(t, (int32_t)i, (int32_t)i);
     uint8_t out[8] = {0};
     TEST_ASSERT_FATAL(touch_entropy_derive(t, out, sizeof(out)));
 }
@@ -146,13 +140,6 @@ static void test_sha256_expand_invalid_input(void) {
     TEST_ASSERT_FATAL(sha256_expand(out, 0, out, sizeof(out)));
 }
 
-static void test_bytes_to_hex_invalid_data(void) {
-    uint8_t data[4] = {0};
-    char    out[16] = {0};
-    TEST_ASSERT_FATAL(bytes_to_hex(NULL, 4, out, sizeof(out)));
-    TEST_ASSERT_FATAL(bytes_to_hex(data, 0, out, sizeof(out)));
-}
-
 static void test_floor_log2_zero(void) { TEST_ASSERT_FATAL(utils_floor_log2(0)); }
 
 int main(void) {
@@ -170,17 +157,15 @@ int main(void) {
     RUN_TEST(test_mnemonic_combine_identical);
     RUN_TEST(test_mnemonic_combine_word_count_mismatch);
     RUN_TEST(test_word_count_bits_invalid);
-    RUN_TEST(test_bytes_to_hex_buffer_too_small);
     RUN_TEST(test_dice_accumulator_overflow);
     RUN_TEST(test_dice_derive_buffer_too_small);
-    RUN_TEST(test_touch_accumulator_overflow);
+    RUN_TEST(test_touch_already_complete);
     RUN_TEST(test_touch_derive_buffer_too_small);
     RUN_TEST(test_mnemonic_from_entropy_invalid_length);
     RUN_TEST(test_mnemonic_combine_self);
     RUN_TEST(test_mnemonic_to_entropy_null);
     RUN_TEST(test_mnemonic_discard_null);
     RUN_TEST(test_sha256_expand_invalid_input);
-    RUN_TEST(test_bytes_to_hex_invalid_data);
     RUN_TEST(test_floor_log2_zero);
     return UNITY_END();
 }

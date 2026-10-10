@@ -46,6 +46,17 @@ typedef enum {
 } hal_camera_pixfmt_t;
 
 /**
+ * @brief Capture sizes a platform can switch between while streaming.
+ *
+ * Only these are reachable with hal_camera_set_size().
+ */
+typedef enum {
+    HAL_CAMERA_SIZE_QVGA = 0, /**< 320x240. */
+    HAL_CAMERA_SIZE_VGA,      /**< 640x480. */
+    HAL_CAMERA_SIZE_COUNT,    /**< Number of sizes (not a size itself). */
+} hal_camera_size_t;
+
+/**
  * @brief A single captured camera frame.
  *
  * The `data` buffer is owned by this struct and must be released with
@@ -92,7 +103,7 @@ hal_camera_t* hal_camera_open(void);
  *
  * Blocks until a frame is available or a timeout elapses.  On success the
  * frame's `data` buffer is allocated and must be released with
- * hal_camera_frame_free().  On failure returns false and leaves @p out
+ * hal_camera_frame_free(). On failure returns false and leaves @p out
  * untouched.
  *
  * @param cam  Open camera session (from hal_camera_open()).
@@ -109,11 +120,89 @@ bool hal_camera_grab(hal_camera_t* cam, hal_camera_frame_t* out);
 void hal_camera_close(hal_camera_t* cam);
 
 /**
+ * @brief Whether hal_camera_set_size() can change the capture size here.
+ *
+ * False where the size is fixed (desktop and browser), so the UI can hide its
+ * resolution control.
+ */
+bool hal_camera_size_switchable(void);
+
+/** @brief The capture size frames are currently produced at. */
+hal_camera_size_t hal_camera_size(void);
+
+/**
+ * @brief Switch the capture size while the camera is streaming.
+ *
+ * The camera restarts, so the first frames may be dark while the sensor
+ * settles. A session from hal_camera_open() stays valid. On failure the
+ * previous size is kept.
+ *
+ * @param size  Capture size (must be < HAL_CAMERA_SIZE_COUNT).
+ * @return true if the camera now captures at @p size.
+ */
+bool hal_camera_set_size(hal_camera_size_t size);
+
+/**
  * @brief Release a frame dequeued with hal_camera_grab().
  *
  * Zeroes and frees `frame->data` and resets the struct.
  */
 void hal_camera_frame_free(hal_camera_frame_t* frame);
+
+/**
+ * @brief Check whether the platform can read an image file from disk.
+ *
+ * The desktop and browser builds let the user scan a QR code straight out of
+ * an image file (a screenshot exported by another wallet, a photo of a
+ * printed SeedQR, ...) instead of pointing the camera at it.  Embedded targets
+ * have no file chooser and always return false, which hides the UI for it.
+ *
+ * @return true if hal_file_image_pick() can be used.
+ */
+bool hal_file_image_available(void);
+
+/**
+ * @brief Ask the user to pick an image file to scan a QR code from.
+ *
+ * Returns immediately.  On Linux the native file chooser runs modally, so this
+ * call blocks until the dialog is dismissed; in the browser the dialog is
+ * asynchronous. Either way the decoded frame is collected with
+ * hal_file_image_poll()
+ *
+ * An animated GIF is decoded frame by frame rather than as a single image, so
+ * that an animated multi-part UR (a fountain-encoded PSBT or wallet
+ * descriptor) can be collected from one file.
+ */
+void hal_file_image_pick(void);
+
+/**
+ * @brief Forget the file picked last and drop any frames still to come.
+ *
+ * Called when the scan screen goes away. An animated GIF would otherwise keep
+ * handing out frames into a scan that has already ended.
+ */
+void hal_file_image_reset(void);
+
+/** Outcome of a hal_file_image_poll() call. */
+typedef enum {
+    HAL_FILE_IMAGE_NONE = 0, /**< Nothing to report (no pick, or it was cancelled). */
+    HAL_FILE_IMAGE_READY,    /**< @p out holds the frame decoded from the file. */
+    HAL_FILE_IMAGE_FAILED,   /**< The picked file could not be read as an image. */
+} hal_file_image_status_t;
+
+/**
+ * @brief Collect the next frame decoded from the image file picked last.
+ *
+ * The frame is a HAL_CAMERA_FMT_GRAY8 image that fits qr_decode()'s size
+ * limits, and it is owned by the caller (release it with
+ * hal_camera_frame_free()). A still image is reported exactly once; an
+ * animated GIF is reported once per frame, at the pace the GIF asks for and
+ * looping until hal_file_image_reset(), so a multi-part UR accumulates.
+ *
+ * @param out  Receives the frame when the call returns HAL_FILE_IMAGE_READY.
+ * @return HAL_FILE_IMAGE_READY / HAL_FILE_IMAGE_FAILED / HAL_FILE_IMAGE_NONE.
+ */
+hal_file_image_status_t hal_file_image_poll(hal_camera_frame_t* out);
 
 /**
  * @brief Check whether touch/pointer input is available for touch entropy.

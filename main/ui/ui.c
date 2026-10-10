@@ -7,9 +7,12 @@
 #include "assets/logo_img.h"
 #include "assets/splash_240x135_img.h"
 #include "assets/splash_480x320_img.h"
+#include "bitvis.h"
+#include "dice.h"
 #include "hal.h"
 #include "mnemonic_view.h"
 #include "src/widgets/label/lv_label_private.h"
+#include "touch.h"
 #include "ui_internal.h"
 #include "util/error.h"
 #include "util/utils.h"
@@ -32,13 +35,48 @@ static lv_obj_t* prev_screen = NULL; // track for deferred cleanup
 
 static lv_group_t* s_nav_group = NULL; // button navigation group (ESP32 keypad)
 
-static lv_obj_t*      camera_img = NULL;       // live camera feed image widget
-static lv_image_dsc_t camera_dsc;              // descriptor backing the live feed
+static lv_obj_t*      camera_img = NULL;           // live camera feed image widget
+static lv_image_dsc_t camera_dsc;                  // descriptor backing the live feed
+static lv_coord_t     camera_preview_w      = 300; // preview box (reference size) of the live feed
+static lv_coord_t     camera_preview_h      = 200;
+static bool           camera_preview_square = false; // fill the box with the frame's centre square
+static uint16_t*      camera_square_buf     = NULL;  // downscaled square, see camera_square_build()
+static lv_coord_t     camera_square_side    = 0;     // its side in pixels (0 = no buffer)
+static lv_obj_t*      camera_delta_img      = NULL;  // "detail" panel beside the frame
+static lv_image_dsc_t camera_delta_dsc;              // descriptor backing that panel
+static uint16_t*      camera_delta_buf = NULL;       // RGB565 cells, freed with its screen
+static lv_coord_t     camera_delta_w = 0, camera_delta_h = 0; // its pixel size, buffer 1:1
+static unsigned       camera_delta_pct   = 0;                 // share of the cells with detail
+static lv_obj_t*      camera_stats       = NULL;              // frames, bytes and detail line
+static unsigned       camera_stat_frames = 0;                 // what main.c last reported
+static uint64_t       camera_stat_bytes  = 0;
+
+// The feed screen's two panels, in reference pixels: the pair fits side by side
+// under the title with the stats line and the button row below.
+#define CAMERA_PANEL_W 225
+#define CAMERA_PANEL_H 169
+
+// Luma steps between one pixel and the next: under this the frame is flat there
+// (a smooth surface, banding, 8-bit rounding), so the cell stays black. A step of
+// CAMERA_DELTA_RANGE more than that lights a cell fully.
+#define CAMERA_DELTA_MIN 12
+#define CAMERA_DELTA_RANGE 32
+// A cell that counts as detail is at least this bright, so the faintest one
+// still shows against the black of a flat scene.
+#define CAMERA_DELTA_LIT 32
+// Below this many per cent of the cells carrying detail, the stats line says so.
+#define CAMERA_FLAT_PCT 2
+
+// Capture size names, indexed by hal_camera_size_t.
+static const char* const s_camera_size_names[HAL_CAMERA_SIZE_COUNT] = {
+    [HAL_CAMERA_SIZE_QVGA] = "QVGA",
+    [HAL_CAMERA_SIZE_VGA]  = "VGA",
+};
 static lv_image_dsc_t seedqr_dsc;              // descriptor backing the SeedQR image
 static uint8_t*       seedqr_buf       = NULL; // RGB565 buffer for the SeedQR image
 static size_t         seedqr_buf_bytes = 0;
 
-// Recursively zero the text of every label under `obj`.  lv_label_set_text()
+// Recursively zero the text of every label under `obj`. lv_label_set_text()
 // copies strings into LVGL-allocated memory; freeing the object does NOT wipe
 // those copies, so mnemonic words and entropy hex would linger in the heap.
 static void wipe_label_texts(lv_obj_t* obj) {
@@ -48,12 +86,10 @@ static void wipe_label_texts(lv_obj_t* obj) {
     }
     if (lv_obj_has_class(obj, &lv_label_class)) {
         lv_label_t* label = (lv_label_t*)obj;
-        if (label->text) secure_memzero(label->text, strlen(label->text));
-        if (label->dot_tmp_alloc && label->dot.tmp_ptr) {
-            secure_memzero(label->dot.tmp_ptr, strlen(label->dot.tmp_ptr));
-        } else {
-            secure_memzero(label->dot.tmp, sizeof(label->dot.tmp));
+        if (label->text && !label->static_txt) {
+            secure_memzero(label->text, strlen(label->text));
         }
+        secure_memzero(label->dot, sizeof(label->dot));
     }
 }
 
@@ -68,7 +104,7 @@ lv_obj_t* ui_make_screen(void) {
 }
 
 /* -- UI scaling ------------------------------------------------------- */
-/* The shared UI is laid out against a 480x320 reference resolution.  On
+/* The shared UI is laid out against a 480x320 reference resolution. On
  * smaller/larger displays everything is scaled by a single uniform factor
  * (the limiting dimension) so screens keep their proportions and fit. */
 #define UI_REF_W 480
@@ -243,7 +279,7 @@ static const struct {
 } btn_sizes[] = {
     [UI_BTN_SIZE_SMALL] = {80, 30, 14},  [UI_BTN_SIZE_MED] = {160, 44, 24},
     [UI_BTN_SIZE_LARGE] = {200, 44, 24}, [UI_BTN_SIZE_WIDE] = {180, 44, 24},
-    [UI_BTN_SIZE_HERO] = {240, 56, 28},
+    [UI_BTN_SIZE_HERO] = {360, 56, 28},
 };
 
 static lv_obj_t* add_btn_impl(lv_obj_t* parent, const char* text, ui_btn_size_t size,
@@ -363,9 +399,9 @@ static void splash_timer_cb(lv_timer_t* t) {
     lv_obj_delete(screen);  // splash is no longer active - safe to free
 }
 
-/* Splash variants are keyed by their native resolution.  Pick the one whose
+/* Splash variants are keyed by their native resolution. Pick the one whose
  * aspect ratio is closest to the active display so any panel (desktop, TTGO,
- * or a future device) gets crisp, undistorted art.  Add a new entry here when
+ * or a future device) gets crisp, undistorted art. Add a new entry here when
  * a new splash_<W>x<H> asset is generated. */
 static const struct {
     const lv_image_dsc_t* dsc;
@@ -415,14 +451,15 @@ void ui_show_splash(ui_cb_t on_done) {
 }
 
 /* -- Screens ---------------------------------------------------------- */
-void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
+void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
+                  lv_event_cb_t on_test_error) {
     ASSERT_OR_DIE(on_new_wallet, "null on_new_wallet");
     ASSERT_OR_DIE(on_test_error, "null on_test_error");
 
     if (!main_scr) {
         main_scr = ui_make_screen();
 
-        // Build main screen with "New Wallet" button
+        // Build main screen with main action buttons
         lv_obj_t* scr = main_scr;
         lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
 
@@ -432,8 +469,15 @@ void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
         lv_image_set_inner_align(logo, LV_IMAGE_ALIGN_STRETCH);
         lv_obj_align(logo, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(10));
 
-        ui_add_btn_evt(scr, "New Wallet", on_new_wallet, NULL, UI_BTN_SIZE_HERO, LV_ALIGN_CENTER, 0,
-                       0);
+        ui_add_btn_evt(scr, "Create Seed Mnemonic", on_new_wallet, NULL, UI_BTN_SIZE_HERO,
+                       LV_ALIGN_CENTER, 0, -30);
+
+        // Transaction/PSBT inspection is only meaningful with a camera.
+        if (hal_camera_available()) {
+            ASSERT_OR_DIE(on_inspect_tx, "null on_inspect_tx");
+            ui_add_btn_evt(scr, "Scan Transaction/PSBT", on_inspect_tx, NULL, UI_BTN_SIZE_HERO,
+                           LV_ALIGN_CENTER, 0, 30);
+        }
 
         // Test error button
         lv_obj_t* test_btn = ui_add_btn_evt(scr, "test error!", on_test_error, NULL,
@@ -536,81 +580,8 @@ void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_qr, ui_cb_t on_dice
 }
 
 /* -- Touch screen entropy --------------------------------------------- */
-static lv_obj_t* touch_status = NULL;
-
-static void touch_status_delete_cb(lv_event_t* e) {
-    (void)e;
-    touch_status = NULL; // invalidate the pointer when the label is deleted
-}
-
-static void touch_area_tap_cb(lv_event_t* e) {
-    union {
-        ui_tap_cb_t fn;
-        void*       vp;
-    } u;
-    u.vp = lv_event_get_user_data(e);
-    if (!u.fn) return;
-
-    lv_indev_t* indev = lv_event_get_indev(e);
-    if (!indev) return;
-    if (lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) return;
-    lv_point_t p;
-    lv_indev_get_point(indev, &p);
-    u.fn(p.x, p.y);
-}
-
-void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel) {
-    ASSERT_OR_DIE(on_tap, "null on_tap");
-    ASSERT_OR_DIE(on_cancel, "null on_cancel");
-
-    lv_obj_t* s = ui_make_screen();
-
-    // Full-screen touch target (behind the cancel button).
-    lv_obj_t* area = lv_obj_create(s);
-    lv_obj_set_size(area, LV_PCT(100), LV_PCT(100));
-    lv_obj_align(area, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_bg_color(area, lv_color_hex(0x0a0a0a), 0);
-    lv_obj_set_style_border_width(area, 0, 0);
-    lv_obj_add_flag(area, LV_OBJ_FLAG_CLICKABLE);
-    union {
-        ui_tap_cb_t fn;
-        void*       vp;
-    } u = {.fn = on_tap};
-    lv_obj_add_event_cb(area, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
-
-    ui_add_title(area, "Touch Screen");
-
-    touch_status = lv_label_create(area);
-    lv_obj_add_event_cb(touch_status, touch_status_delete_cb, LV_EVENT_DELETE, NULL);
-    lv_label_set_text(touch_status, "Tap anywhere to collect entropy");
-    lv_obj_set_style_text_color(touch_status, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_text_font(touch_status, ui_font(18), 0);
-    lv_obj_set_style_text_align(touch_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(touch_status, LV_ALIGN_CENTER, 0, 0);
-
-    // Cancel button - centered below the status text.
-    // A short tap passes through and still collects entropy, hold (long
-    // press) to activate cancel.
-    lv_obj_t* cancel_btn = lv_button_create(s);
-    lv_obj_set_size(cancel_btn, ui_scale(240), ui_scale(44));
-    lv_obj_align(cancel_btn, LV_ALIGN_CENTER, 0, ui_scale(70));
-    lv_obj_add_event_cb(cancel_btn, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
-    union {
-        ui_cb_t fn;
-        void*   vp;
-    } u_cancel = {.fn = on_cancel};
-    lv_obj_add_event_cb(cancel_btn, ui_btn_invoke, LV_EVENT_LONG_PRESSED, u_cancel.vp);
-    lv_obj_t* cancel_lbl = lv_label_create(cancel_btn);
-    lv_label_set_text(cancel_lbl, "Cancel (hold to activate)");
-    lv_obj_set_style_text_font(cancel_lbl, ui_font(14), 0);
-    lv_obj_center(cancel_lbl);
-
-    ui_swap_screen(s);
-}
-
-void ui_touch_screen_set_status(const char* text) {
-    if (touch_status) lv_label_set_text(touch_status, text);
-}
+// The touch screen lives at the end of this file: it reuses the entropy meter
+// below and the help helpers, which are both defined further down.
 
 /* -- Dice sides picker ----------------------------------------------- */
 static ui_uint_cb_t dice_on_sides = NULL;
@@ -641,7 +612,7 @@ void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back) {
     for (size_t i = 0; i < sizeof(sides) / sizeof(sides[0]); i++) {
         int  row = (int)(i / 3);
         int  col = (int)(i % 3);
-        char face[8];
+        char face[12];
         snprintf(face, sizeof(face), "%u", sides[i]);
 
         lv_obj_t* b = lv_button_create(s);
@@ -660,14 +631,181 @@ void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back) {
     ui_swap_screen(s);
 }
 
-/* -- Dice roll entropy ----------------------------------------------- */
-static lv_obj_t*    dice_status  = NULL;
-static ui_uint_cb_t dice_on_roll = NULL;
-
-static void dice_status_delete_cb(lv_event_t* e) {
-    (void)e;
-    dice_status = NULL; // invalidate the pointer when the label is deleted
+/* -- Entropy collection meter ----------------------------------------- */
+// Widest part of the die, i.e. the most bits one roll can add. A die is read as
+// a sum of power-of-two parts (see dice.c), so this is floor(log2(sides)).
+static unsigned roll_max_bits(unsigned sides) {
+    unsigned k = 0;
+    while ((2u << k) <= sides) k++;
+    return k;
 }
+
+// Expected bits per roll in thousandths, summed over the faces with the same
+// rule the collector runs. A power-of-two die gives its full log2(sides);
+// splitting costs the rest (a d6 pays 1.67 where 2.58 is available).
+static unsigned roll_rate_milli(unsigned sides) {
+    unsigned long sum = 0;
+    for (unsigned face = 1; face <= sides; face++) sum += dice_entropy_roll_bits(sides, face);
+    return (unsigned)(sum * 1000ul / sides);
+}
+
+/* The dice, coin and touch screens all hand out whole bits, so they share this
+ * meter: the counts, the newest input's bits as one block of the same grid, the
+ * rate it pays and how much is left, and the grid itself. */
+
+typedef struct {
+    lv_obj_t*     counts;
+    bitvis_roll_t roll; // the newest input, drawn like one byte block
+    lv_obj_t*     rate; // "6.00 bits/tap", what this source pays
+    lv_obj_t*     togo; // "~43 taps left"
+    const char*   singular;
+    const char*   plural;
+    unsigned      rate_milli;
+    bitvis_grid_t grid;
+} entropy_meter_t;
+
+static entropy_meter_t dice_meter;
+static entropy_meter_t coin_meter;
+static entropy_meter_t touch_meter;
+
+// A plain lv_obj takes clicks by default, which would swallow the taps a screen
+// behind it collects; the meter and its rows are all decoration.
+void ui_clickthrough(lv_obj_t* obj) {
+    if (obj) lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+}
+
+// Clears the slot a widget was stored in when it is deleted.
+static void ui_forget_cb(lv_event_t* e) {
+    lv_obj_t** slot = lv_event_get_user_data(e);
+    if (slot && *slot == lv_event_get_target_obj(e)) *slot = NULL;
+}
+
+void ui_forget_on_delete(lv_obj_t* obj, lv_obj_t** slot) {
+    ASSERT_OR_DIE(obj && slot, "ui_forget_on_delete: null argument");
+    lv_obj_add_event_cb(obj, ui_forget_cb, LV_EVENT_DELETE, slot);
+}
+
+static void meter_delete_cb(lv_event_t* e) {
+    entropy_meter_t* m = lv_event_get_user_data(e);
+    if (m) m->counts = NULL;
+}
+
+// Panel that hosts the grid: a content-sized area under the title, capped so a
+// tall grid scrolls instead of eating the buttons.
+static lv_obj_t* meter_panel_create(lv_obj_t* parent) {
+    lv_obj_t* panel = lv_obj_create(parent);
+    // The panel keeps its clicks: it is the scrollable object, so dragging the
+    // grid inside it scrolls. A caller that collects taps adds a handler.
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(panel, ui_scale(440), LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(panel, ui_scale(104), 0);
+    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+    lv_obj_set_style_bg_opa(panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_set_style_pad_row(panel, ui_scale(4), 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(panel, LV_DIR_VER);
+    return panel;
+}
+
+// What the die is worth, and what is left to collect: how thorough the die is
+// (every roll is whole bits, none are held back) and how much more it costs.
+static void meter_rate_create(entropy_meter_t* m, lv_obj_t* parent) {
+    lv_obj_t* row = lv_obj_create(parent);
+    ui_clickthrough(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, ui_scale(6), 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    m->rate = lv_label_create(row);
+    lv_label_set_text(m->rate, "");
+    lv_obj_set_style_text_color(m->rate, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(m->rate, ui_font(12), 0);
+    lv_obj_set_flex_grow(m->rate, 1); // pushes the estimate right
+
+    m->togo = lv_label_create(row);
+    lv_label_set_text(m->togo, "");
+    lv_obj_set_style_text_color(m->togo, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(m->togo, ui_font(12), 0);
+}
+
+// Build the counts + newest-input block, the rate row and the bit grid, inside
+// @p parent. The block gets @p block_cells cells, the most bits one input can
+// add; @p prompt shows until the first input.
+static void meter_create(entropy_meter_t* m, lv_obj_t* parent, lv_obj_t* screen,
+                         uint32_t total_bits, unsigned block_cells, unsigned rate_milli,
+                         const char* singular, const char* plural, const char* prompt) {
+    memset(m, 0, sizeof(*m));
+    m->rate_milli = rate_milli;
+    m->singular   = singular;
+    m->plural     = plural;
+
+    lv_obj_t* row = lv_obj_create(parent);
+    ui_clickthrough(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    m->counts = lv_label_create(row);
+    lv_label_set_text(m->counts, prompt);
+    lv_obj_set_style_text_color(m->counts, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(m->counts, ui_font(14), 0);
+
+    // The newest input, as one block of the same grid.
+    bitvis_roll_create(&m->roll, row, screen, block_cells);
+
+    meter_rate_create(m, parent);
+
+    bitvis_grid_create(&m->grid, parent, screen, total_bits);
+    lv_obj_add_event_cb(parent, meter_delete_cb, LV_EVENT_DELETE, m);
+}
+
+// Refresh the counts, the rate row, the newest-input block and the grid (@p face
+// is the label for the block, built by the caller). Every input is worth whole
+// bits, so there is nothing in flight: what the source pays now is what the grid
+// has.
+static void meter_set(entropy_meter_t* m, const uint8_t* bytes, unsigned count, uint32_t filled,
+                      uint32_t target, const char* face, uint32_t last_bits) {
+    if (!m->counts) return;
+
+    char text[64];
+    int  res = snprintf(text, sizeof(text), "%u / %u bits   %u %s", (unsigned)filled,
+                       (unsigned)target, count, m->plural);
+    if (res > 0 && (size_t)res < sizeof(text)) lv_label_set_text(m->counts, text);
+
+    if (m->rate) {
+        const unsigned hundredths = (m->rate_milli + 5u) / 10u; // 1.67 for a d6
+        char           line[48];
+        int            rb = snprintf(line, sizeof(line), "%u.%02u bits/%s", hundredths / 100u,
+                          hundredths % 100u, m->singular);
+        if (rb > 0 && (size_t)rb < sizeof(line)) lv_label_set_text(m->rate, line);
+
+        unsigned long left = 0;
+        if (m->rate_milli > 0 && filled < target) {
+            left = (unsigned long)(target - filled) * 1000ul / m->rate_milli;
+        }
+        char est[32];
+        int  rt = snprintf(est, sizeof(est), "~%lu %s left", left, m->plural);
+        if (rt > 0 && (size_t)rt < sizeof(est)) lv_label_set_text(m->togo, est);
+    }
+
+    // Both show the bits the newest input produced.
+    bitvis_roll_set(&m->roll, face, bytes, filled, last_bits);
+    bitvis_grid_set(&m->grid, bytes, filled, filled - last_bits);
+}
+
+/* -- Dice roll entropy ----------------------------------------------- */
+static ui_uint_cb_t dice_on_roll = NULL;
 
 static void dice_btn_cb(lv_event_t* e) {
     if (!dice_on_roll) return;
@@ -675,7 +813,8 @@ static void dice_btn_cb(lv_event_t* e) {
     dice_on_roll((uint8_t)v);
 }
 
-void ui_show_dice(unsigned sides, ui_uint_cb_t on_roll, ui_cb_t on_cancel) {
+void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_cb_t on_help,
+                  ui_cb_t on_cancel) {
     ASSERT_OR_DIE(sides >= 2, "sides must be >= 2");
     ASSERT_OR_DIE(on_roll, "null on_roll");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
@@ -685,57 +824,53 @@ void ui_show_dice(unsigned sides, ui_uint_cb_t on_roll, ui_cb_t on_cancel) {
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Dice Rolls");
 
-    dice_status = lv_label_create(s);
-    lv_obj_add_event_cb(dice_status, dice_status_delete_cb, LV_EVENT_DELETE, NULL);
-    lv_label_set_text(dice_status, "Roll the die, tap the result");
-    lv_obj_set_style_text_color(dice_status, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_text_font(dice_status, ui_font(18), 0);
-    lv_obj_set_style_text_align(dice_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(dice_status, LV_ALIGN_TOP_MID, 0, ui_scale(60));
+    lv_obj_t* panel = meter_panel_create(s);
+    meter_create(&dice_meter, panel, s, total_bits, roll_max_bits(sides), roll_rate_milli(sides),
+                 "roll", "rolls", "Roll the die, tap the result");
 
-    // 1..sides face buttons, wrapped into a scrollable grid.
+    // Face buttons, wrapped into a scrollable grid just above the footer.
     lv_obj_t* grid = lv_obj_create(s);
-    lv_obj_set_size(grid, ui_scale(440), ui_scale(180));
-    lv_obj_align(grid, LV_ALIGN_CENTER, 0, ui_scale(20));
+    lv_obj_set_size(grid, ui_scale(440), ui_scale(104));
+    lv_obj_align(grid, LV_ALIGN_BOTTOM_MID, 0, -ui_scale(56));
     lv_obj_set_style_bg_color(grid, lv_color_black(), 0);
     lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0); // so the rows fit the panel exactly
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(grid, ui_scale(8), 0);
-    lv_obj_set_style_pad_column(grid, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(grid, ui_scale(6), 0);
+    lv_obj_set_style_pad_column(grid, ui_scale(6), 0);
     lv_obj_set_scroll_dir(grid, LV_DIR_VER);
 
     for (unsigned v = 1; v <= sides; v++) {
-        char face[8];
+        char face[12];
         snprintf(face, sizeof(face), "%u", v);
 
         lv_obj_t* b = lv_button_create(grid);
-        lv_obj_set_size(b, ui_scale(64), ui_scale(48));
+        lv_obj_set_size(b, ui_scale(42), ui_scale(28));
         lv_obj_add_event_cb(b, dice_btn_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)v);
 
         lv_obj_t* l = lv_label_create(b);
         lv_label_set_text(l, face);
-        lv_obj_set_style_text_font(l, ui_font(24), 0);
+        lv_obj_set_style_text_font(l, ui_font(20), 0);
         lv_obj_center(l);
     }
 
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_LEFT, 10, -10);
     ui_add_btn(s, "Back", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
 }
 
-void ui_dice_set_status(const char* text) {
-    if (dice_status) lv_label_set_text(dice_status, text);
+void ui_dice_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
+                          uint32_t needed, unsigned last_roll, uint32_t last_bits) {
+    ASSERT_OR_DIE(bytes, "null bytes");
+    char face[12];
+    snprintf(face, sizeof(face), "%u", last_roll);
+    meter_set(&dice_meter, bytes, count, filled_bits, needed, face, last_bits);
 }
 
 /* -- Coin flip entropy ----------------------------------------------- */
-static lv_obj_t*    coin_status  = NULL;
 static ui_uint_cb_t coin_on_flip = NULL;
-
-static void coin_status_delete_cb(lv_event_t* e) {
-    (void)e;
-    coin_status = NULL; // invalidate the pointer when the label is deleted
-}
 
 static void coin_btn_cb(lv_event_t* e) {
     if (!coin_on_flip) return;
@@ -746,7 +881,7 @@ static void coin_btn_cb(lv_event_t* e) {
     coin_on_flip((txt[0] == 'T') ? 1 : 0); // "Tails" -> 1, "Heads" -> 0
 }
 
-void ui_show_coin(ui_uint_cb_t on_flip, ui_cb_t on_cancel) {
+void ui_show_coin(uint32_t total_bits, ui_uint_cb_t on_flip, ui_cb_t on_help, ui_cb_t on_cancel) {
     ASSERT_OR_DIE(on_flip, "null on_flip");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
 
@@ -755,46 +890,679 @@ void ui_show_coin(ui_uint_cb_t on_flip, ui_cb_t on_cancel) {
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Coin Flips");
 
-    coin_status = lv_label_create(s);
-    lv_obj_add_event_cb(coin_status, coin_status_delete_cb, LV_EVENT_DELETE, NULL);
-    lv_label_set_text(coin_status, "Flip a coin, tap the result");
-    lv_obj_set_style_text_color(coin_status, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_text_font(coin_status, ui_font(18), 0);
-    lv_obj_set_style_text_align(coin_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(coin_status, LV_ALIGN_TOP_MID, 0, ui_scale(60));
+    lv_obj_t* panel = meter_panel_create(s);
+    meter_create(&coin_meter, panel, s, total_bits, 1, 1000, "flip", "flips",
+                 "Flip a coin, tap the result");
 
-    ui_add_btn_evt(s, "Heads", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, -95, 20);
-    ui_add_btn_evt(s, "Tails", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, 95, 20);
+    ui_add_btn_evt(s, "Heads", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, -95, 40);
+    ui_add_btn_evt(s, "Tails", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, 95, 40);
 
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_LEFT, 10, -10);
     ui_add_btn(s, "Back", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
 }
 
-void ui_coin_set_status(const char* text) {
-    if (coin_status) lv_label_set_text(coin_status, text);
+void ui_coin_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
+                          uint32_t needed, unsigned last_roll, uint32_t last_bits) {
+    ASSERT_OR_DIE(bytes, "null bytes");
+    char face[2] = {(last_roll == 1) ? 'H' : 'T', '\0'};
+    meter_set(&coin_meter, bytes, count, filled_bits, needed, face, last_bits);
 }
 
-void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
+/* -- How rolls become bits (help) ------------------------------------- */
+// Handles for the diagrams: bitvis handles must outlive their screen, so they
+// live here and are set once, well before the screen's widgets go away.
+static bitvis_roll_t help_d4;       // a d4 roll and the bits it is worth
+static bitvis_roll_t help_burst[3]; // d6 rolls 3, 6, 5 -> 2, 1 and 1 bits
+static bitvis_grid_t help_seed;     // where those bits land in the seed
+
+// A wrapped paragraph in the help body.
+static void help_text(lv_obj_t* parent, const char* text, uint8_t font_px, uint32_t color) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(color), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(font_px), 0);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+}
+
+// Heading + paragraph, the shape every section starts with.
+static void help_section(lv_obj_t* parent, const char* heading, const char* body) {
+    help_text(parent, heading, 14, 0xFFFFFF);
+    help_text(parent, body, 12, 0xBBBBBB);
+}
+
+// A row to keep several diagrams side by side.
+static lv_obj_t* help_row(lv_obj_t* parent) {
+    lv_obj_t* row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, ui_scale(14), 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return row;
+}
+
+void ui_show_roll_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Rolls to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so
+    // leave room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bitvis diagrams are opaque RGB565
+    // buffers with black backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. A power-of-two die: one roll is exactly its bits, every time.
+    help_section(cont, "Power-of-two dice (d2, d4, d8, d16)",
+                 "Each roll is worth a fixed number of bits - 1, 2, 3 or 4 -"
+                 " written most significant bit first. A coin is a d2: heads 0, tails 1.");
+    bitvis_roll_create(&help_d4, cont, s, 2);
+    {
+        // d4 roll 3 -> 3 - 1 = 2 -> 10.
+        const uint8_t example[1] = {0x80};
+        bitvis_roll_set(&help_d4, "3", example, 2, 2);
+    }
+    help_text(cont, "roll 3 of a d4 -> 10. Every roll gives exactly two bits.", 12, 0x888888);
+
+    // 2. The other dice are sums of power-of-two dice, which is what makes every
+    // roll worth a whole number of bits.
+    help_section(cont, "Other dice (d6, d10, d12, d20)",
+                 "These dice are read as a sum of power-of-two dice: a d6 is a d4 plus a coin,"
+                 " a d10 is a d8 plus a coin, a d12 is a d8 plus a d4, a d20 is a d16 plus a"
+                 " d4. A face is worth the bits of the part it falls in, so every roll pays out"
+                 " whole bits at once and none are held back. The parts cost bits - a d6 pays"
+                 " 1.67 a roll where carrying the fraction would pay 2.58 - so it takes more"
+                 " rolls, and only an odd-sided die has a face worth nothing at all.");
+    help_text(cont, "A d6 showing 3, then 6, then 5:", 12, 0xFFFFFF);
+    {
+        // Faces 1..4 are the d4 (2 bits); 5 and 6 are the coin (1 bit).
+        const uint8_t ex[1] = {0xA0}; // 10 1 0
+        lv_obj_t*     row   = help_row(cont);
+
+        bitvis_roll_create(&help_burst[0], row, s, 2);
+        bitvis_roll_set(&help_burst[0], "3", ex, 2, 2); // the d4 part -> 10
+        bitvis_roll_create(&help_burst[1], row, s, 1);
+        bitvis_roll_set(&help_burst[1], "6", ex, 3, 1); // the coin part -> 1
+        bitvis_roll_create(&help_burst[2], row, s, 1);
+        bitvis_roll_set(&help_burst[2], "5", ex, 4, 1); // the coin part -> 0
+    }
+    help_text(cont,
+              "2, then 1, then 1 bit: whole bits every roll. Faces 1 to 4 of a d6 read exactly"
+              " like a d4, and 5 and 6 are the coin.",
+              12, 0x888888);
+
+    // 3. Those bits are the seed.
+    help_section(cont, "Those bits are the seed",
+                 "They fill the grid from the front, most significant bit first. Nothing is"
+                 " hashed and nothing is thrown away: every bit a roll is worth goes in as it"
+                 " lands, so the seed is as strong as the bits it holds.");
+    bitvis_grid_create(&help_seed, cont, s, 8);
+    {
+        // Two rolls so far: face 3 gave 10, face 6 gave 1 -> 101 = 0xA0.
+        const uint8_t example[1] = {0xA0};
+        bitvis_grid_set(&help_seed, example, 3, 1);
+    }
+    help_text(cont,
+              "the one bit from roll 6 (highlighted) joins the two roll 3 gave - the rest is"
+              " still to come",
+              12, 0x888888);
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
+}
+
+/* -- Touch screen entropy (a tap is worth whole bits) ------------------ */
+// The screen is read as an 8x8 grid of tiles, so a tap is worth whole bits and
+// those bits can be drawn. It sits here because it reuses the entropy meter and
+// the help helpers above.
+static lv_obj_t*     touch_tiles[TOUCH_TILES_PER_AXIS * TOUCH_TILES_PER_AXIS];
+static lv_obj_t*     touch_area        = NULL;
+static lv_obj_t*     touch_instruction = NULL;
+static lv_obj_t*     touch_seed_box    = NULL;
+static lv_obj_t*     touch_seed_btn    = NULL;
+static bitvis_grid_t touch_seed_grid;
+
+static void touch_area_tap_cb(lv_event_t* e) {
+    union {
+        ui_tap_cb_t fn;
+        void*       vp;
+    } u;
+    u.vp = lv_event_get_user_data(e);
+    if (!u.fn) return;
+
+    lv_indev_t* indev = lv_event_get_indev(e);
+    if (!indev) return;
+    if (lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) return;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    u.fn(p.x, p.y);
+}
+
+// Light the tile the newest tap landed in, so the grid the bits come from is
+// something you can see rather than something you are told about.
+static void touch_light_tile(unsigned tile) {
+    const unsigned n = TOUCH_TILES_PER_AXIS * TOUCH_TILES_PER_AXIS;
+    for (unsigned i = 0; i < n; i++) {
+        if (!touch_tiles[i]) continue;
+        if (i == tile) {
+            lv_obj_set_style_bg_color(touch_tiles[i], lv_color_hex(UI_COLOR_SEED_GREEN), 0);
+            lv_obj_set_style_bg_opa(touch_tiles[i], LV_OPA_30, 0);
+        } else {
+            lv_obj_set_style_bg_opa(touch_tiles[i], LV_OPA_TRANSP, 0);
+        }
+    }
+}
+
+void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel, ui_cb_t on_help,
+                          ui_cb_t on_continue, uint32_t target_bits) {
+    ASSERT_OR_DIE(on_tap, "null on_tap");
+    ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ASSERT_OR_DIE(on_continue, "null on_continue");
+    ASSERT_OR_DIE(target_bits % 16u == 0, "touch target must halve into whole bytes");
+
+    memset(touch_tiles, 0, sizeof(touch_tiles));
+
+    lv_obj_t* s = ui_make_screen();
+
+    // Full-screen touch target; every widget above it is non-clickable, so a tap
+    // anywhere still counts unless it lands on Help or the hold-to-cancel button.
+    lv_obj_t* area = lv_obj_create(s);
+    touch_area     = area;
+    ui_forget_on_delete(area, &touch_area);
+    lv_obj_set_size(area, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(area, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(area, lv_color_hex(0x0a0a0a), 0);
+    lv_obj_set_style_border_width(area, 0, 0);
+    lv_obj_set_style_pad_all(area, 0, 0);
+    lv_obj_add_flag(area, LV_OBJ_FLAG_CLICKABLE);
+    union {
+        ui_tap_cb_t fn;
+        void*       vp;
+    } u = {.fn = on_tap};
+    lv_obj_add_event_cb(area, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+
+    ui_add_title(area, "Touch Screen");
+
+    // The tiles the collector reads, drawn at the size the collector uses.
+    lv_display_t*    disp = lv_display_get_default();
+    const lv_coord_t tw =
+        (lv_coord_t)(lv_display_get_horizontal_resolution(disp) / (int32_t)TOUCH_TILES_PER_AXIS);
+    const lv_coord_t th =
+        (lv_coord_t)(lv_display_get_vertical_resolution(disp) / (int32_t)TOUCH_TILES_PER_AXIS);
+    for (unsigned row = 0; row < TOUCH_TILES_PER_AXIS; row++) {
+        for (unsigned col = 0; col < TOUCH_TILES_PER_AXIS; col++) {
+            lv_obj_t* tile = lv_obj_create(area);
+            lv_obj_set_size(tile, tw, th);
+            lv_obj_set_pos(tile, (lv_coord_t)col * tw, (lv_coord_t)row * th);
+            lv_obj_set_style_pad_all(tile, 0, 0);
+            lv_obj_set_style_radius(tile, 0, 0);
+            lv_obj_set_style_bg_opa(tile, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(tile, 1, 0);
+            lv_obj_set_style_border_color(tile, lv_color_hex(0x2a2a2a), 0);
+            ui_clickthrough(tile); // the tap has to reach the screen behind
+            touch_tiles[row * TOUCH_TILES_PER_AXIS + col] = tile;
+        }
+    }
+
+    lv_obj_t* panel = meter_panel_create(area);
+    meter_create(&touch_meter, panel, s, target_bits, TOUCH_BITS_PER_TAP,
+                 TOUCH_BITS_PER_TAP * 1000u, "tap", "taps", "Tap the tiles to collect bits");
+    // A tap that lands on the meter counts like any other: the panel hands its
+    // clicks over, so neither the grid nor its box can swallow a tap.
+    lv_obj_add_event_cb(panel, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+
+    touch_instruction = lv_label_create(area);
+    ui_forget_on_delete(touch_instruction, &touch_instruction);
+    lv_label_set_text(touch_instruction, "the tile you hit becomes 6 bits");
+    lv_obj_set_style_text_color(touch_instruction, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(touch_instruction, ui_font(12), 0);
+    lv_obj_align(touch_instruction, LV_ALIGN_BOTTOM_MID, 0, ui_scale(-46));
+
+    // The finish: the tapped bits stay where they are and the seed they hash to
+    // appears below them, so the two can be compared before continuing.
+    touch_seed_box = lv_obj_create(area);
+    ui_forget_on_delete(touch_seed_box, &touch_seed_box);
+    ui_clickthrough(touch_seed_box);
+    lv_obj_set_size(touch_seed_box, ui_scale(440), LV_SIZE_CONTENT);
+    lv_obj_align(touch_seed_box, LV_ALIGN_TOP_MID, 0, ui_scale(162));
+    lv_obj_set_style_bg_opa(touch_seed_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(touch_seed_box, 0, 0);
+    lv_obj_set_style_pad_all(touch_seed_box, 0, 0);
+    lv_obj_set_flex_flow(touch_seed_box, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(touch_seed_box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    {
+        lv_obj_t* cap = lv_label_create(touch_seed_box);
+        lv_label_set_text(cap, "hashed into the seed");
+        lv_obj_set_style_text_color(cap, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(cap, ui_font(12), 0);
+    }
+    bitvis_grid_create(&touch_seed_grid, touch_seed_box, s, target_bits / 2u);
+
+    touch_seed_btn =
+        ui_add_btn(area, "Continue", on_continue, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_add_flag(touch_seed_box, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(touch_seed_btn, LV_OBJ_FLAG_HIDDEN);
+
+    // Help and Cancel are both holds: a short tap on either collects entropy
+    // like anywhere else on the screen, so neither steals a tap.
+    if (on_help) {
+        lv_obj_t* help_btn = lv_button_create(area);
+        lv_obj_set_size(help_btn, ui_scale(110), ui_scale(30));
+        lv_obj_align(help_btn, LV_ALIGN_BOTTOM_LEFT, 10, -8);
+        lv_obj_add_event_cb(help_btn, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+        union {
+            ui_cb_t fn;
+            void*   vp;
+        } u_help = {.fn = on_help};
+        lv_obj_add_event_cb(help_btn, ui_btn_invoke, LV_EVENT_LONG_PRESSED, u_help.vp);
+        lv_obj_t* help_lbl = lv_label_create(help_btn);
+        lv_label_set_text(help_lbl, "Help (hold)");
+        lv_obj_set_style_text_font(help_lbl, ui_font(12), 0);
+        lv_obj_center(help_lbl);
+    }
+
+    lv_obj_t* cancel_btn = lv_button_create(area);
+    lv_obj_set_size(cancel_btn, ui_scale(110), ui_scale(30));
+    lv_obj_align(cancel_btn, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
+    lv_obj_add_event_cb(cancel_btn, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
+    union {
+        ui_cb_t fn;
+        void*   vp;
+    } u_cancel = {.fn = on_cancel};
+    lv_obj_add_event_cb(cancel_btn, ui_btn_invoke, LV_EVENT_LONG_PRESSED, u_cancel.vp);
+    lv_obj_t* cancel_lbl = lv_label_create(cancel_btn);
+    lv_label_set_text(cancel_lbl, "Cancel (hold)");
+    lv_obj_set_style_text_font(cancel_lbl, ui_font(12), 0);
+    lv_obj_center(cancel_lbl);
+
+    ui_swap_screen(s);
+}
+
+void ui_touch_screen_set_progress(const uint8_t* bytes, uint32_t bits, uint32_t target_bits,
+                                  unsigned taps, unsigned last_tile) {
+    ASSERT_OR_DIE(bytes, "null bytes");
+    char face[12];
+    snprintf(face, sizeof(face), "%u", last_tile); // the tile's number, 0..63
+    meter_set(&touch_meter, bytes, taps, bits, target_bits, face, TOUCH_BITS_PER_TAP);
+    touch_light_tile(last_tile);
+}
+
+void ui_touch_screen_show_seed(const uint8_t* seed, size_t seed_len) {
+    ASSERT_OR_DIE(seed, "null seed");
+    if (seed_len == 0 || seed_len > 32) return;
+
+    // Collecting is over: the screen stops taking taps, so a tap on the finish
+    // view cannot be mistaken for more entropy.
+    if (touch_area) {
+        lv_obj_remove_event_cb(touch_area, touch_area_tap_cb);
+        ui_clickthrough(touch_area);
+    }
+
+    // The tiles have done their job; the tapped bits stay visible above the seed.
+    const unsigned n = TOUCH_TILES_PER_AXIS * TOUCH_TILES_PER_AXIS;
+    for (unsigned i = 0; i < n; i++) {
+        if (touch_tiles[i]) lv_obj_add_flag(touch_tiles[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    if (touch_instruction) lv_obj_add_flag(touch_instruction, LV_OBJ_FLAG_HIDDEN);
+    if (touch_seed_box) {
+        bitvis_grid_set(&touch_seed_grid, seed, (uint32_t)seed_len * 8u, 0);
+        lv_obj_remove_flag(touch_seed_box, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (touch_seed_btn) lv_obj_remove_flag(touch_seed_btn, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* -- Taps to bits (touch help) ----------------------------------------- */
+static bitvis_roll_t help_tile; // a tile's number and the bits it is worth
+
+void ui_show_touch_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Taps to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, ui_scale(440), h);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not 0x111111: the bitvis diagrams are opaque RGB565 with black
+    // backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    // 1. The tiles are the input, which is what makes the bits whole.
+    help_section(cont, "The screen is a grid of tiles",
+                 "It is read as 8 by 8 tiles - 64 of them - and the tile a tap lands in is"
+                 " written as its number in six bits, so every tap is worth whole bits with no"
+                 " fraction left over. The lit square shows the tile just hit.");
+    bitvis_roll_create(&help_tile, cont, s, TOUCH_BITS_PER_TAP);
+    {
+        // Tile 13 -> 001101, the six top bits of 0x34.
+        const uint8_t example[1] = {0x34};
+        bitvis_roll_set(&help_tile, "13", example, 6, 6);
+    }
+    help_text(cont,
+              "tile 13 -> 001101: a tap in the top left corner writes 000000 and one in the"
+              " bottom right 111111.",
+              12, 0x888888);
+
+    // 2. The bits land in the grid as they come.
+    help_section(cont, "The bits fill the grid",
+                 "They fill it from the front, most significant bit first. Six bits land per"
+                 " tap and none are held back, so the grid is exactly what the taps have"
+                 " produced - at this point nothing has been hashed.");
+
+    // 3. Then it is hashed into the seed.
+    help_section(cont, "Then it is hashed into the seed",
+                 "A hand is not uniform over the screen and one tap is not independent of the"
+                 " last, so the tapped bits are hashed with SHA-256 to make the seed, and only"
+                 " half of them are assumed to carry anything. A 128-bit seed therefore takes"
+                 " 256 tapped bits, which is 43 taps; a 24-word seed takes 512, which is 86."
+                 " The screen shows both at the end.");
+
+    // 4. The one thing no hash can fix.
+    help_section(cont, "Tap at random",
+                 "Spreading taps over the whole grid is what makes them worth six bits each."
+                 " A pattern - the same tile, a row, a diagonal - has far less entropy than it"
+                 " looks, and hashing cannot put back what was never there.");
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
+}
+
+// Capture-size control, shared by the camera screens. Only offered where the
+// platform can change size, so the button is never a no-op.
+static const char* camera_size_name(void) {
+    const hal_camera_size_t size = hal_camera_size();
+    return (size < HAL_CAMERA_SIZE_COUNT) ? s_camera_size_names[size] : "?";
+}
+
+static void camera_size_btn_cb(lv_event_t* e) {
+    lv_obj_t* target = lv_event_get_target(e);
+
+    const hal_camera_size_t next =
+        (hal_camera_size_t)(((unsigned)hal_camera_size() + 1u) % (unsigned)HAL_CAMERA_SIZE_COUNT);
+    (void)hal_camera_set_size(next);
+
+    // Read the label back from the HAL: a refused switch must not leave the
+    // button claiming a size the camera is not using.
+    lv_obj_t* label = target ? lv_obj_get_child(target, 0) : NULL;
+    if (label) lv_label_set_text(label, camera_size_name());
+}
+
+// Top-right: the scan screen's progress bar already owns the bottom middle.
+static void add_camera_size_btn(lv_obj_t* parent) {
+    if (!hal_camera_size_switchable() || !hal_camera_available()) return;
+    ui_add_btn_evt(parent, camera_size_name(), camera_size_btn_cb, NULL, UI_BTN_SIZE_SMALL,
+                   LV_ALIGN_TOP_RIGHT, -10, 5);
+}
+
+// The detail panel's buffer belongs to the screen that made it: this frees the one
+// it was handed and not whatever the static points at by then, because the help
+// screen swaps the feed out and back.
+typedef struct {
+    uint16_t* delta; // RGB565 cells, one per panel pixel
+} camera_delta_bufs_t;
+
+static void camera_delta_ctrl_delete_cb(lv_event_t* e) {
+    camera_delta_bufs_t* b = lv_event_get_user_data(e);
+    if (!b) return;
+    if (camera_delta_buf == b->delta) camera_delta_buf = NULL;
+    free(b->delta);
+    free(b);
+}
+
+// A small grey caption, used to name the two panels.
+static void camera_caption(lv_obj_t* parent, const char* text, lv_align_t align, lv_coord_t x,
+                           lv_coord_t y) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(12), 0);
+    lv_obj_align(lbl, align, ui_scale(x), ui_scale(y));
+}
+
+// Frames seen, bytes collected and how much of the frame carries detail: the
+// numbers behind the detail panel, and the nudge when it stays black.
+static void camera_stats_refresh(void) {
+    if (!camera_stats) return;
+
+    char           seen[24];
+    const uint64_t bytes = camera_stat_bytes;
+    if (bytes >= (1u << 20)) {
+        const unsigned mb     = (unsigned)(bytes >> 20);
+        const unsigned tenths = (unsigned)((bytes >> 10) % 1024u) * 10u / 1024u;
+        snprintf(seen, sizeof(seen), "%u.%u MB", mb, tenths);
+    } else {
+        snprintf(seen, sizeof(seen), "%u KB", (unsigned)(bytes >> 10));
+    }
+
+    char line[64];
+    int  res;
+    if (camera_delta_pct < CAMERA_FLAT_PCT) {
+        res = snprintf(line, sizeof(line), "%u frames - %s - point at a busier scene",
+                       camera_stat_frames, seen);
+    } else {
+        res = snprintf(line, sizeof(line), "%u frames - %s - %u %% detail", camera_stat_frames,
+                       seen, camera_delta_pct);
+    }
+    if (res > 0 && (size_t)res < sizeof(line)) lv_label_set_text(camera_stats, line);
+}
+
+void ui_camera_feed_stats(unsigned frames, uint64_t bytes) {
+    camera_stat_frames = frames;
+    camera_stat_bytes  = bytes;
+    camera_stats_refresh();
+}
+
+// Rec. 601 luma of a packed RGB565 pixel, without a divide in sight.
+static uint8_t camera_luma(uint16_t px) {
+    const uint32_t r5 = (px >> 11) & 0x1Fu;
+    const uint32_t g6 = (px >> 5) & 0x3Fu;
+    const uint32_t b5 = px & 0x1Fu;
+    return (uint8_t)((r5 * 315u + g6 * 304u + b5 * 120u) >> 7);
+}
+
+// The detail panel, cell by cell: how far the luma of one pixel stands out from
+// the pixels beside and below it. That is the contrast in the frame, so a lit,
+// textured scene shows its edges while a flat, dark or covered one stays black.
+static void camera_delta_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
+    if (!camera_delta_img || !camera_delta_buf) return;
+    if (w < 2 || h < 2) return;
+
+    const lv_coord_t dw     = camera_delta_w;
+    const lv_coord_t dh     = camera_delta_h;
+    const uint16_t*  src    = (const uint16_t*)rgb565;
+    const uint32_t   step_x = ((uint32_t)w << 16) / (uint32_t)dw; // 16.16, no divide in the loop
+    const uint32_t   step_y = ((uint32_t)h << 16) / (uint32_t)dh;
+    unsigned         lit    = 0;
+
+    for (lv_coord_t y = 0; y < dh; y++) {
+        const uint32_t  sy  = ((uint32_t)y * step_y) >> 16;
+        const uint16_t* row = src + (size_t)sy * w;
+        uint16_t*       out = camera_delta_buf + (size_t)y * (size_t)dw;
+        // The row under the sample, clamped at the last one, so the bottom edge
+        // compares against itself and stays dark.
+        const uint16_t* below_row = row + ((sy + 1u < h) ? w : 0);
+        for (lv_coord_t x = 0; x < dw; x++) {
+            const uint32_t sx    = ((uint32_t)x * step_x) >> 16;
+            const uint32_t sx1   = (sx + 1u < w) ? (sx + 1u) : sx;
+            const uint8_t  here  = camera_luma(row[sx]);
+            const uint8_t  right = camera_luma(row[sx1]);
+            const uint8_t  under = camera_luma(below_row[sx]);
+            const uint8_t  d_r = (here > right) ? (uint8_t)(here - right) : (uint8_t)(right - here);
+            const uint8_t  d_u = (here > under) ? (uint8_t)(here - under) : (uint8_t)(under - here);
+            const uint8_t  d   = (d_r > d_u) ? d_r : d_u;
+            if (d < CAMERA_DELTA_MIN) {
+                out[x] = 0;
+                continue;
+            }
+            lit++;
+            uint32_t bright = (uint32_t)(d - CAMERA_DELTA_MIN) * 255u / CAMERA_DELTA_RANGE;
+            if (bright > 255u) bright = 255u;
+            if (bright < CAMERA_DELTA_LIT) bright = CAMERA_DELTA_LIT; // faint grain reads grey
+            out[x] = (uint16_t)(((bright & 0xF8u) << 8) | ((bright & 0xFCu) << 3) | (bright >> 3));
+        }
+    }
+
+    const uint32_t cells = (uint32_t)dw * (uint32_t)dh;
+    camera_delta_pct     = (unsigned)((uint64_t)lit * 100u / cells);
+
+    lv_obj_invalidate(camera_delta_img);
+    camera_stats_refresh();
+}
+
+void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel, ui_cb_t on_help) {
     ASSERT_OR_DIE(on_use, "null on_use");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
 
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Camera");
 
+    camera_preview_w      = CAMERA_PANEL_W;
+    camera_preview_h      = CAMERA_PANEL_H;
+    camera_preview_square = false; // this screen shows the whole frame
+
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     camera_dsc.header.cf    = LV_COLOR_FORMAT_RGB565;
 
+    camera_caption(s, "live", LV_ALIGN_TOP_LEFT, 12, 51);
+    camera_caption(s, "detail", LV_ALIGN_TOP_RIGHT, -12, 51);
+
     camera_img = lv_image_create(s);
-    lv_obj_set_size(camera_img, ui_scale(300), ui_scale(200));
-    lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
+    ui_forget_on_delete(camera_img, &camera_img);
+    lv_obj_set_size(camera_img, ui_scale(camera_preview_w), ui_scale(camera_preview_h));
+    lv_obj_align(camera_img, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(68));
+
+    // The panel is drawn at its own pixel size, so nothing is scaled on the way
+    // to the screen; its buffer travels with it and is freed when it goes.
+    camera_delta_w     = ui_scale(CAMERA_PANEL_W);
+    camera_delta_h     = ui_scale(CAMERA_PANEL_H);
+    const size_t cells = (size_t)camera_delta_w * (size_t)camera_delta_h;
+
+    camera_delta_bufs_t* bufs = calloc(1, sizeof(*bufs));
+    ASSERT_OR_DIE(bufs, "out of memory for the detail panel");
+    bufs->delta = calloc(cells * 2u, 1); // black until the first frame lands
+    ASSERT_OR_DIE(bufs->delta, "out of memory for the detail panel");
+    camera_delta_buf = bufs->delta;
+    camera_delta_pct = 0;
+
+    memset(&camera_delta_dsc, 0, sizeof(camera_delta_dsc));
+    camera_delta_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+    camera_delta_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+    camera_delta_dsc.header.w      = (uint16_t)camera_delta_w;
+    camera_delta_dsc.header.h      = (uint16_t)camera_delta_h;
+    camera_delta_dsc.header.stride = (uint16_t)(camera_delta_w * 2);
+    camera_delta_dsc.data_size     = (uint32_t)(cells * 2u);
+    camera_delta_dsc.data          = (const uint8_t*)camera_delta_buf;
+
+    camera_delta_img = lv_image_create(s);
+    ui_forget_on_delete(camera_delta_img, &camera_delta_img);
+    lv_obj_add_event_cb(camera_delta_img, camera_delta_ctrl_delete_cb, LV_EVENT_DELETE, bufs);
+    lv_image_set_src(camera_delta_img, &camera_delta_dsc);
+    lv_obj_set_size(camera_delta_img, camera_delta_w, camera_delta_h); // 1:1
+    lv_obj_align(camera_delta_img, LV_ALIGN_TOP_RIGHT, ui_scale(-10), ui_scale(68));
+
+    camera_stats = lv_label_create(s);
+    ui_forget_on_delete(camera_stats, &camera_stats);
+    lv_label_set_text(camera_stats, "");
+    lv_obj_set_style_text_color(camera_stats, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(camera_stats, ui_font(12), 0);
+    lv_obj_align(camera_stats, LV_ALIGN_TOP_MID, 0, ui_scale(243));
+    camera_stats_refresh();
 
     /* "Use Image" (left) and "Cancel" (right). */
     ui_add_btn(s, "Use Image", on_use, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_LEFT, 10, 5);
+    add_camera_size_btn(s);
 
     ui_swap_screen(s);
+}
+
+// Average four RGB565 pixels channel by channel, so packing loses nothing.
+static uint16_t camera_avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
+    const uint32_t r = ((a >> 11) + (b >> 11) + (c >> 11) + (d >> 11)) >> 2;
+    const uint32_t g =
+        (((a >> 5) & 0x3Fu) + ((b >> 5) & 0x3Fu) + ((c >> 5) & 0x3Fu) + ((d >> 5) & 0x3Fu)) >> 2;
+    const uint32_t bl = ((a & 0x1Fu) + (b & 0x1Fu) + (c & 0x1Fu) + (d & 0x1Fu)) >> 2;
+    return (uint16_t)((r << 11) | (g << 5) | bl);
+}
+
+// Downscale the frame's centre square to `side` pixels by averaging 2x2
+// blocks. Doing it here keeps LVGL out of the scaling: its scaled draw was
+// ~27 ms for this 200x200 box and tore the panel while it ran.
+static bool camera_square_build(const uint8_t* frame, uint32_t w, uint32_t h, lv_coord_t side) {
+    if (side <= 0) return false;
+
+    if (camera_square_side != side) {
+        free(camera_square_buf);
+        camera_square_buf  = malloc((size_t)side * (size_t)side * 2u);
+        camera_square_side = camera_square_buf ? side : 0;
+    }
+    if (!camera_square_buf) return false;
+
+    const uint32_t  src_side = (w < h) ? w : h; // the frame's centred square
+    const uint32_t  x0       = (w - src_side) / 2u;
+    const uint32_t  y0       = (h - src_side) / 2u;
+    const uint16_t* src      = (const uint16_t*)frame;
+
+    // Source step per output pixel in 16.16: Xtensa has no divide instruction.
+    const uint32_t step = ((uint32_t)src_side << 16) / (uint32_t)side;
+
+    for (lv_coord_t y = 0; y < side; y++) {
+        const uint32_t  sy  = y0 + (((uint32_t)y * step) >> 16);
+        const uint16_t* r0  = src + (size_t)sy * w + x0;
+        const uint16_t* r1  = (sy + 1u < y0 + src_side) ? r0 + w : r0;
+        uint16_t*       out = camera_square_buf + (size_t)y * (size_t)side;
+
+        for (lv_coord_t x = 0; x < side; x++) {
+            const uint32_t sx = ((uint32_t)x * step) >> 16;
+            const uint32_t nx = (sx + 1u < src_side) ? sx + 1u : sx;
+            out[x]            = camera_avg4(r0[sx], r0[nx], r1[sx], r1[nx]);
+        }
+    }
+    return true;
 }
 
 void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
@@ -802,9 +1570,43 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
     ASSERT_OR_DIE(rgb565, "null rgb565");
     ASSERT_OR_DIE(w > 0 && h > 0, "invalid camera frame size");
 
+    // The detail panel is filled from the same frame, ahead of the preview work.
+    camera_delta_update(rgb565, w, h);
+
+    camera_dsc.header.w      = (uint16_t)w;
+    camera_dsc.header.h      = (uint16_t)h;
+    camera_dsc.header.stride = (uint16_t)(w * 2);
+    camera_dsc.data_size     = w * h * 2;
+    camera_dsc.data          = rgb565;
+
+    if (camera_preview_square) {
+        // Scanning: show the largest centred square. Display only - the
+        // decoder still gets every captured pixel.
+        const lv_coord_t side = (camera_preview_h < camera_preview_w) ? ui_scale(camera_preview_h)
+                                                                      : ui_scale(camera_preview_w);
+        if (camera_square_build(rgb565, w, h, side)) {
+            // Widget exactly the image size, so LVGL blits with no transform.
+            camera_dsc.header.w      = (uint16_t)side;
+            camera_dsc.header.h      = (uint16_t)side;
+            camera_dsc.header.stride = (uint16_t)(side * 2);
+            camera_dsc.data_size     = (uint32_t)side * (uint32_t)side * 2u;
+            camera_dsc.data          = (const uint8_t*)camera_square_buf;
+            lv_obj_set_size(camera_img, side, side);
+            lv_image_set_src(camera_img, &camera_dsc);
+            lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_STRETCH);
+            return;
+        }
+
+        // Out of memory: let LVGL scale the frame itself, slower but correct.
+        lv_obj_set_size(camera_img, side, side);
+        lv_image_set_src(camera_img, &camera_dsc);
+        lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_COVER);
+        return;
+    }
+
     // Fit the frame into the scaled preview area, preserving aspect ratio
-    uint32_t preview_w = (uint32_t)ui_scale(300);
-    uint32_t preview_h = (uint32_t)ui_scale(200);
+    uint32_t preview_w = (uint32_t)ui_scale(camera_preview_w);
+    uint32_t preview_h = (uint32_t)ui_scale(camera_preview_h);
     uint32_t disp_w = w, disp_h = h;
     if (w > preview_w || h > preview_h) {
         uint32_t zx = (256 * preview_w) / w;
@@ -815,16 +1617,94 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
     }
     lv_obj_set_size(camera_img, disp_w, disp_h);
 
-    camera_dsc.header.w      = (uint16_t)w;
-    camera_dsc.header.h      = (uint16_t)h;
-    camera_dsc.header.stride = (uint16_t)(w * 2);
-    camera_dsc.data_size     = w * h * 2;
-    camera_dsc.data          = rgb565;
-
     // Set the source first so the image has valid dimensions, then apply the
     // stretch alignment
     lv_image_set_src(camera_img, &camera_dsc);
     lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_STRETCH);
+}
+
+/* -- Frames to bits (camera help) -------------------------------------- */
+static bitvis_roll_t cam_help_px;   // one pixel's eight low bits
+static bitvis_grid_t cam_help_seed; // the bits a frame becomes
+
+void ui_show_camera_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Frames to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so
+    // leave room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bit views below are opaque RGB565
+    // buffers with black backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. A frame is a lot of numbers, and the numbers wobble.
+    help_section(cont, "The camera turns light into numbers",
+                 "A frame is a grid of pixels and each pixel is three brightness readings -"
+                 " red, green and blue. Light decides roughly how bright each one is; the last"
+                 " step or two of a reading is noise the sensor cannot predict, and that is"
+                 " what this source is worth. It sits in the low bits of a pixel and in the"
+                 " grain between neighbouring pixels; the detail panel shows where that grain"
+                 " and the scene's edges are strong.");
+    bitvis_roll_create(&cam_help_px, cont, s, 8);
+    {
+        // One pixel's eight low bits, out of a frame.
+        const uint8_t example[1] = {0x6B};
+        bitvis_roll_set(&cam_help_px, "px", example, 8, 8);
+    }
+    help_text(cont, "one pixel's low eight bits - 01101011 here", 12, 0x888888);
+
+    // 2. Every byte of the frame is hashed into the seed.
+    help_section(cont, "The whole frame is hashed into the seed",
+                 "Every byte of the frame goes through SHA-256, which spreads what the frame"
+                 " has evenly over the 128 or 256 bits the words are made of. Hashing adds"
+                 " nothing: a frame of a million bytes with nothing new in it yields nothing"
+                 " new, which is why the detail panel beside the picture is the honest meter"
+                 " for this source.");
+    bitvis_grid_create(&cam_help_seed, cont, s, 128);
+    {
+        // A seed as it looks once a frame has been hashed into it.
+        const uint8_t example[16] = {0x5A, 0x2E, 0xC4, 0x17, 0x88, 0x3B, 0xD2, 0x64,
+                                     0x9F, 0x05, 0x71, 0xAE, 0x40, 0xBB, 0x1D, 0xE3};
+        bitvis_grid_set(&cam_help_seed, example, 128, 128);
+    }
+    help_text(cont, "a 128-bit seed, most significant bit first", 12, 0x888888);
+
+    // 3. What to point it at.
+    help_section(cont, "A flat or dark scene is worth very little",
+                 "A covered lens, a dark room, a blank wall: the detail panel goes black because"
+                 " there is nothing in the frame that stands out from what is next to it. Point"
+                 " the camera at a lit scene with texture in it, let a good few frames pass, and"
+                 " keep your hand out of the shot. The seed is as strong as the noise and the"
+                 " light in the frame, not as interesting as the view.");
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
 }
 
 void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done) {
@@ -895,28 +1775,180 @@ void ui_seedqr_cleanup(void) {
     }
 }
 
-void ui_show_qr_scan(ui_cb_t on_scan, ui_cb_t on_cancel) {
-    ASSERT_OR_DIE(on_scan, "null on_scan");
+static lv_obj_t* qr_scan_bar    = NULL;
+static lv_obj_t* qr_scan_status = NULL;
+
+static void qr_scan_bar_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_bar = NULL;
+}
+
+static void qr_scan_status_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_status = NULL;
+}
+
+void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file) {
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ASSERT_OR_DIE(title, "null title");
+
+    /* Scanning an image file is only offered where the platform can do it
+     * (desktop and browser builds). Its button sits next to Cancel, which
+     * costs a button row, so the live preview shrinks to make room. */
+    bool have_file_btn = on_open_file && hal_file_image_available();
 
     lv_obj_t* s = ui_make_screen();
-    ui_add_title(s, "Scan QR");
+    ui_add_title(s, title);
+
+    camera_preview_w      = 300;
+    camera_preview_h      = have_file_btn ? 160 : 200;
+    camera_preview_square = true; // scanning: show the frame's centre square only
 
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     camera_dsc.header.cf    = LV_COLOR_FORMAT_RGB565;
 
     camera_img = lv_image_create(s);
-    lv_obj_set_size(camera_img, ui_scale(300), ui_scale(200));
+    lv_obj_set_size(camera_img, ui_scale(camera_preview_w), ui_scale(camera_preview_h));
     lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
 
-    ui_add_btn(s, "Scan", on_scan, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    /* Multipart progress: status text above a progress bar. */
+    qr_scan_status = lv_label_create(s);
+    lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+    lv_obj_set_style_text_color(qr_scan_status, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(qr_scan_status, ui_font(14), 0);
+    lv_obj_set_width(qr_scan_status, ui_scale(250));
+    lv_obj_align(qr_scan_status, LV_ALIGN_BOTTOM_LEFT, ui_scale(20),
+                 ui_scale(have_file_btn ? -90 : -50));
+    lv_obj_add_event_cb(qr_scan_status, qr_scan_status_delete_cb, LV_EVENT_DELETE, NULL);
+
+    qr_scan_bar = lv_bar_create(s);
+    lv_obj_set_size(qr_scan_bar, ui_scale(250), ui_scale(12));
+    lv_obj_align(qr_scan_bar, LV_ALIGN_BOTTOM_LEFT, ui_scale(20),
+                 ui_scale(have_file_btn ? -70 : -26));
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(0x222222), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(UI_COLOR_SEED_GREEN), LV_PART_INDICATOR);
+    lv_bar_set_range(qr_scan_bar, 0, 100);
+    lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+    lv_obj_add_event_cb(qr_scan_bar, qr_scan_bar_delete_cb, LV_EVENT_DELETE, NULL);
+
+    if (have_file_btn) {
+        ui_add_btn(s, "Open File", on_open_file, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    }
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    add_camera_size_btn(s);
 
     ui_swap_screen(s);
 }
 
-void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export) {
+void ui_qr_scan_progress(size_t received, size_t expected) {
+    if (expected == 0) {
+        if (qr_scan_status) lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+        if (qr_scan_bar) {
+            lv_bar_set_range(qr_scan_bar, 0, 100);
+            lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+        }
+        return;
+    }
+
+    char buf[40];
+    int  res = snprintf(buf, sizeof(buf), "Part %u of %u", (unsigned)received, (unsigned)expected);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(buf), "progress string too long");
+    if (qr_scan_status) lv_label_set_text(qr_scan_status, buf);
+    if (qr_scan_bar) {
+        lv_bar_set_range(qr_scan_bar, 0, (int32_t)expected);
+        lv_bar_set_value(qr_scan_bar, (int32_t)received, LV_ANIM_ON);
+    }
+}
+
+/* Shared layout for the "read this before going on" screens: an optional
+ * warning line, a scrollable text body (with arrow buttons on devices without
+ * touch) and a one- or two-button footer. */
+static void ui_show_text_screen(const char* title, const char* body, const char* warning,
+                                const char* ok_label, ui_cb_t on_ok, const char* cancel_label,
+                                ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(body, "null body");
+    ASSERT_OR_DIE(ok_label, "null ok_label");
+    ASSERT_OR_DIE(on_ok, "null on_ok");
+    ASSERT_OR_DIE(!cancel_label || on_cancel, "cancel label without callback");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t body_top = ui_scale(50);
+
+    if (warning && warning[0]) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, warning);
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(12), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(w, ui_scale(440));
+        lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+        lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+        lv_obj_update_layout(w);
+        body_top = ui_scale(50) + lv_obj_get_height(w) + ui_scale(8);
+    }
+
+    lv_coord_t cont_h = LV_VER_RES - body_top - ui_scale(60);
+    if (cont_h < ui_scale(40)) cont_h = ui_scale(40);
+
+    /* On devices without touch the summary is scrolled with the arrow buttons,
+     * so leave room for them at the right of the screen instead of hanging
+     * them off the edge of the body. */
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, cont_h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), body_top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, body_top);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+
+    lv_obj_t* lbl = lv_label_create(cont);
+    lv_label_set_text(lbl, body);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+    lv_obj_set_width(lbl, body_w - ui_scale(16));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_scroll_to_y(cont, 0, LV_ANIM_OFF); /* always start at the first line */
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), body_top);
+    }
+
+    if (cancel_label) {
+        /* The accepting button is created first so a button-only device starts
+         * with it focused: a stray press must not discard what was scanned. */
+        ui_add_btn(s, ok_label, on_ok, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+        ui_add_btn(s, cancel_label, on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    } else {
+        ui_add_btn(s, ok_label, on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    }
+
+    ui_swap_screen(s);
+}
+
+void ui_show_tx_inspect(const char* title, const char* body, const char* warning, ui_cb_t on_done) {
+    ui_show_text_screen(title, body, warning, "Done", on_done, NULL, NULL);
+}
+
+void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on_continue,
+                                 ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ui_show_text_screen(title, body, NULL, "Continue", on_continue, "Cancel", on_cancel);
+}
+
+void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export,
+                      ui_cb_t on_help, const mnemonic_bits_t* bits) {
     ASSERT_OR_DIE(words, "null words");
     ASSERT_OR_DIE(on_ok, "null on_ok");
 
@@ -942,6 +1974,9 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
     }
     ui_add_title(s, title);
 
+    // Top-right: the footer is spoken for, and the title only reaches the middle.
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_RIGHT, -10, 5);
+
     if (show_warning) {
         lv_obj_t* w = lv_label_create(s);
         lv_label_set_text(w, "Write these words down.\nNever share them!");
@@ -951,22 +1986,58 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
         lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(55));
     }
 
+    // Everything under the title hangs off the block above it, so the grid lands
+    // wherever the warning and the entropy line leave room.
+    lv_obj_t* anchor = NULL;
+    if (show_warning) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, "Write these words down.\nNever share them!");
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(14), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(55));
+        anchor = w;
+    }
+
+    // The entropy the words were cut from, back at the top of the final screen.
+    if (bits && bits->entropy_hex) {
+        lv_obj_t* ent = lv_label_create(s);
+        lv_label_set_text(ent, bits->entropy_hex);
+        lv_obj_set_style_text_color(ent, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(ent, ui_font(12), 0);
+        lv_obj_set_style_text_align(ent, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(ent, ui_scale(440));
+        lv_label_set_long_mode(ent, LV_LABEL_LONG_WRAP);
+        if (anchor)
+            lv_obj_align_to(ent, anchor, LV_ALIGN_OUT_BOTTOM_MID, 0, ui_scale(6));
+        else
+            lv_obj_align(ent, LV_ALIGN_TOP_MID, 0, ui_scale(55));
+        anchor = ent;
+    }
+
     lv_obj_t* grid = ui_mnemonic_view_create(s);
-    lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, ui_scale(show_warning ? 85 : 55));
-    ui_mnemonic_view_set_words(grid, words);
+    if (anchor)
+        lv_obj_align_to(grid, anchor, LV_ALIGN_OUT_BOTTOM_MID, 0, ui_scale(8));
+    else
+        lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, ui_scale(55));
+    ui_mnemonic_view_set_words(grid, words, bits);
     lv_obj_update_layout(grid);
 
-    if (ui_small_screen()) {
-        lv_coord_t top   = ui_scale(show_warning ? 85 : 55);
-        lv_coord_t max_h = LV_VER_RES - top - ui_scale(76);
+    // Cap the grid so the footer stays reachable, and let it scroll when 24 words
+    // with their bits do not fit.
+    {
+        const lv_coord_t top   = lv_obj_get_y(grid);
+        lv_coord_t       max_h = LV_VER_RES - top - ui_scale(76);
         if (max_h < ui_scale(40)) max_h = ui_scale(40);
         if (lv_obj_get_height(grid) > max_h) {
             lv_obj_set_height(grid, max_h);
             lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_scroll_dir(grid, LV_DIR_VER);
+            if (ui_small_screen()) {
+                lv_obj_t* arrows = ui_add_scroll_arrows(s, grid, ui_scale(30));
+                lv_obj_align_to(arrows, grid, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
+            }
         }
-        lv_obj_t* arrows = ui_add_scroll_arrows(s, grid, ui_scale(30));
-        lv_obj_align_to(arrows, grid, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
     }
 
     if (on_export) {
@@ -980,9 +2051,151 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
     ui_swap_screen(s);
 }
 
-void ui_show_merge_process(const char* current_words, const char* current_entropy_hex,
-                           const char* new_entropy_hex, const char* merged_entropy_hex,
-                           const char* merged_words, ui_cb_t on_ok) {
+/* -- Words from bits (help) -------------------------------------------- */
+// Two example blocks for a word and for the short last word of each seed size.
+// Static: the blocks have to outlive the screen.
+static bitvis_roll_t help_word;
+static bitvis_roll_t help_last12;
+static bitvis_roll_t help_last24;
+
+void ui_show_words_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Words from Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so leave
+    // room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bit blocks below are opaque RGB565
+    // buffers with black backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. Eleven bits become one word.
+    help_section(cont, "Eleven bits pick a word",
+                 "The entropy is read from the front, eleven bits at a time, and each group is a"
+                 " number from 0 to 2047. That number is the index of the word in the BIP39 list"
+                 " of 2048, which is why the words look nothing like the bits they came from.");
+    bitvis_roll_create(&help_word, cont, s, 11);
+    {
+        // Eleven bits worth 1: the second word of the list.
+        const uint8_t example[2] = {0x00, 0x20};
+        bitvis_roll_set(&help_word, "", example, 11, 11);
+    }
+    help_text(cont, "00000000001 -> 1 -> ability", 12, 0x888888);
+
+    // 2. The last word is short: the checksum takes the rest of its eleven bits.
+    help_section(cont, "The last word carries the checksum",
+                 "Eleven bits a word does not divide the seed exactly. A 128-bit seed is eleven"
+                 " words and seven bits, so the twelfth takes those seven and four more that are a"
+                 " checksum over the seed. A 256-bit seed is twenty-three words and three bits, so"
+                 " the twenty-fourth takes three and eight. Those cells are drawn dark, and the"
+                 " word's number and bits are green: they are not seed material, they are what"
+                 " proves the words were copied down correctly.");
+    {
+        lv_obj_t* row = help_row(cont);
+
+        const uint8_t last12[2] = {0xB0, 0x00}; // seven entropy bits
+        bitvis_roll_create(&help_last12, row, s, 11);
+        bitvis_roll_set(&help_last12, "128", last12, 7, 7);
+
+        const uint8_t last24[2] = {0x60, 0x00}; // three entropy bits
+        bitvis_roll_create(&help_last24, row, s, 11);
+        bitvis_roll_set(&help_last24, "256", last24, 3, 3);
+    }
+    help_text(cont, "the last word of a 128-bit seed, and of a 256-bit one", 12, 0x888888);
+
+    // 3. Where it can be seen for real.
+    help_section(cont, "Where you see it",
+                 "Every word box on the words screen carries the eleven bits that picked its word"
+                 " and the index they make, so any word can be followed back to its bits.");
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
+}
+
+void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, ui_cb_t on_ok) {
+    ASSERT_OR_DIE(entropy_hex, "null entropy");
+    ASSERT_OR_DIE(on_ok, "null on_ok");
+
+    lv_obj_t* s = ui_make_screen();
+
+    const char* title;
+    switch (type) {
+    case MNEMONIC_TYPE_GENERATED:
+        title = "Generated Entropy";
+        break;
+    case MNEMONIC_TYPE_ENTERED:
+        title = "Entered Entropy";
+        break;
+    case MNEMONIC_TYPE_MERGED:
+        title = "Merged Entropy";
+        break;
+    default:
+        title = "Entropy";
+        break;
+    }
+    ui_add_title(s, title);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, ui_scale(440), ui_scale(200));
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+
+    lv_obj_t* lbl = lv_label_create(cont);
+    lv_label_set_text(lbl, "Entropy:");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+
+    lv_obj_t* val = lv_label_create(cont);
+    lv_label_set_text(val, entropy_hex);
+    lv_obj_set_style_text_color(val, lv_color_white(), 0);
+    lv_obj_set_style_text_font(val, ui_font(14), 0);
+    lv_obj_set_width(val, ui_scale(420));
+    lv_label_set_long_mode(val, LV_LABEL_LONG_WRAP);
+
+    // Bit-level view of the same entropy, animated below the hex text.
+    bitvis_add_entropy(cont, s, entropy_hex);
+
+    if (!hal_touch_available()) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align_to(arrows, cont, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
+    }
+
+    ui_add_btn(s, "Ok", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    ui_swap_screen(s);
+}
+
+void ui_show_merge_process(const char* current_entropy_hex, const char* new_entropy_hex,
+                           const char* merged_entropy_hex, ui_cb_t on_ok) {
     ASSERT_OR_DIE(on_ok, "null on_ok");
 
     lv_obj_t* s = ui_make_screen();
@@ -1000,14 +2213,12 @@ void ui_show_merge_process(const char* current_words, const char* current_entrop
     struct {
         const char* label;
         const char* value;
-    } lines[] = {{"Current mnemonic:", current_words},
-                 {"Current entropy:", current_entropy_hex},
+    } lines[] = {{"Current entropy:", current_entropy_hex},
                  {"", ""},
                  {"New entropy:", new_entropy_hex},
                  {"", ""},
                  {"--- XOR merge ---", ""},
                  {"Merged entropy:", merged_entropy_hex},
-                 {"Merged mnemonic:", merged_words},
                  {NULL, NULL}};
 
     for (int i = 0; lines[i].label; i++) {
@@ -1026,6 +2237,9 @@ void ui_show_merge_process(const char* current_words, const char* current_entrop
             lv_label_set_long_mode(val, LV_LABEL_LONG_WRAP);
         }
     }
+
+    // Bit-level view of the same XOR, animated below the hex text.
+    bitvis_add_xor(cont, s, current_entropy_hex, new_entropy_hex, merged_entropy_hex);
 
     if (!hal_touch_available()) {
         lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
@@ -1080,6 +2294,108 @@ void ui_show_msg(const char* msg) {
     lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
     ui_swap_screen(s);
     lv_refr_now(NULL);
+}
+
+void ui_show_confirm(const char* title, const char* msg, const char* yes_label,
+                     const char* no_label, ui_cb_t on_yes, ui_cb_t on_no) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(msg, "null msg");
+    ASSERT_OR_DIE(yes_label, "null yes_label");
+    ASSERT_OR_DIE(no_label, "null no_label");
+    ASSERT_OR_DIE(on_yes, "null on_yes");
+    ASSERT_OR_DIE(on_no, "null on_no");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_obj_t* l = lv_label_create(s);
+    lv_label_set_text(l, msg);
+    lv_obj_set_style_text_color(l, lv_color_white(), 0);
+    lv_obj_set_style_text_font(l, ui_font(18), 0);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(l, ui_scale(440));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, ui_scale(-30));
+
+    ui_add_btn(s, yes_label, on_yes, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    ui_add_btn(s, no_label, on_no, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+
+    ui_swap_screen(s);
+}
+
+/* -- Choice list ------------------------------------------------------ */
+typedef struct {
+    ui_uint_cb_t cb;
+    uint8_t      index;
+} choice_ctx_t;
+
+static void choice_invoke_cb(lv_event_t* e) {
+    choice_ctx_t* ctx = (choice_ctx_t*)lv_event_get_user_data(e);
+    if (ctx && ctx->cb) ctx->cb(ctx->index);
+}
+
+static void choice_ctx_delete_cb(lv_event_t* e) {
+    choice_ctx_t* ctx = (choice_ctx_t*)lv_obj_get_user_data(lv_event_get_target(e));
+    if (ctx) lv_free(ctx);
+}
+
+void ui_show_choice(const char* title, const char* msg, const char* const* options, size_t count,
+                    ui_uint_cb_t on_choice, ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(options, "null options");
+    ASSERT_OR_DIE(on_choice, "null on_choice");
+    ASSERT_OR_DIE(count > 0 && count <= 255, "invalid option count");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t top = ui_scale(60);
+    if (msg && msg[0]) {
+        lv_obj_t* m = lv_label_create(s);
+        lv_label_set_text(m, msg);
+        lv_obj_set_style_text_color(m, lv_color_white(), 0);
+        lv_obj_set_style_text_font(m, ui_font(14), 0);
+        lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(m, ui_scale(440));
+        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+        lv_obj_align(m, LV_ALIGN_TOP_MID, 0, ui_scale(52));
+        lv_obj_update_layout(m);
+        top = ui_scale(52) + lv_obj_get_height(m) + ui_scale(10);
+    }
+
+    /* The list scrolls, so it is not limited by the screen height. */
+    lv_coord_t avail = LV_VER_RES - top - ui_scale(56);
+    if (avail < ui_scale(44)) avail = ui_scale(44);
+
+    lv_obj_t* list = lv_obj_create(s);
+    lv_obj_set_size(list, ui_scale(440), avail);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, top);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, ui_scale(8), 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+
+    for (size_t i = 0; i < count; i++) {
+        choice_ctx_t* ctx = lv_malloc(sizeof(*ctx));
+        ASSERT_OR_DIE(ctx, "choice ctx alloc");
+        ctx->cb    = on_choice;
+        ctx->index = (uint8_t)i;
+
+        lv_obj_t* b = ui_add_btn(list, options[i], NULL, UI_BTN_SIZE_HERO, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_user_data(b, ctx);
+        lv_obj_add_event_cb(b, choice_invoke_cb, LV_EVENT_CLICKED, ctx);
+        lv_obj_add_event_cb(b, choice_ctx_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+
+    if (on_cancel)
+        ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
 }
 
 static lv_obj_t* mnemonic_error_btn(lv_obj_t* parent, const char* text, ui_cb_t cb,

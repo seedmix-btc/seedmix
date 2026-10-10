@@ -27,7 +27,24 @@ static void test_one_bit_per_flip(void) {
     coin_entropy_add_flip(c, 0);
     TEST_ASSERT_EQUAL_UINT(2, coin_entropy_bits(c));
     TEST_ASSERT_EQUAL_UINT(2, coin_entropy_flips(c));
+    TEST_ASSERT_EQUAL_UINT8(0x80, coin_entropy_bytes(c)[0]); // tails=1, heads=0, ...
     coin_entropy_discard(c);
+}
+
+static void test_derive_is_the_flip_bits(void) {
+    uint8_t out[32] = {0};
+
+    coin_entropy_t* heads = coin_entropy_begin(12);
+    for (unsigned i = 0; i < 128; i++) coin_entropy_add_flip(heads, 0);
+    TEST_ASSERT_EQUAL_UINT(16, (unsigned)coin_entropy_derive(heads, out, sizeof(out)));
+    for (unsigned i = 0; i < 16; i++) TEST_ASSERT_EQUAL_UINT8(0x00, out[i]);
+    coin_entropy_discard(heads);
+
+    coin_entropy_t* tails = coin_entropy_begin(12);
+    for (unsigned i = 0; i < 128; i++) coin_entropy_add_flip(tails, 1);
+    TEST_ASSERT_EQUAL_UINT(16, (unsigned)coin_entropy_derive(tails, out, sizeof(out)));
+    for (unsigned i = 0; i < 16; i++) TEST_ASSERT_EQUAL_UINT8(0xFF, out[i]);
+    coin_entropy_discard(tails);
 }
 
 static void test_ready_after_128_flips(void) {
@@ -62,6 +79,7 @@ int main(void) {
     RUN_TEST(test_begin_defaults);
     RUN_TEST(test_one_bit_per_flip);
     RUN_TEST(test_ready_after_128_flips);
+    RUN_TEST(test_derive_is_the_flip_bits);
     RUN_TEST(test_derive_lengths);
     return UNITY_END();
 }

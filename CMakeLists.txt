@@ -36,6 +36,7 @@ endif()
 set(COMMON_SOURCES
     main/main.c
     main/ui/ui.c
+    main/ui/bitvis.c
     main/assets/splash_480x320_img.c
     main/assets/splash_240x135_img.c
     main/assets/logo_img.c
@@ -49,6 +50,12 @@ set(COMMON_SOURCES
     main/crypto/secure_stack.c
     main/crypto/bip39_wordlist.c
     main/crypto/seedqr.c
+    main/crypto/txinspect.c
+    main/crypto/descriptor.c
+    main/crypto/ur_descriptor.c
+    main/crypto/ur_psbt.c
+    main/crypto/ur.c
+    main/crypto/fountain.c
     main/qr/qr.c
     main/util/error.c
     main/util/log.c

@@ -20,36 +20,56 @@ void secure_memzero(void* ptr, size_t len) {
     // Non-elidable wipe from the C library
     explicit_bzero(ptr, len);
 #else
-    // Portable fallback (e.g. ESP-IDF newlib): volatile store loop
-    volatile uint8_t* p = (volatile uint8_t*)ptr;
-    while (len--) *p++ = 0;
+    // Portable fallback (e.g. ESP-IDF newlib): stores stay volatile so the
+    // compiler cannot elide the wipe. Word-wide where alignment allows.
+    volatile uint8_t* bytes = (volatile uint8_t*)ptr;
+
+    size_t head = sizeof(uintptr_t) - ((size_t)(uintptr_t)ptr & (sizeof(uintptr_t) - 1u));
+    if (head == sizeof(uintptr_t)) head = 0;
+    if (head > len) head = len;
+    for (size_t i = 0; i < head; i++) bytes[i] = 0;
+    bytes += head;
+    len -= head;
+
+    while (len >= sizeof(uintptr_t)) {
+        *(volatile uintptr_t*)(void*)bytes = 0;
+        bytes += sizeof(uintptr_t);
+        len -= sizeof(uintptr_t);
+    }
+
+    while (len--) *bytes++ = 0;
 #endif
 }
 
-void bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size) {
-    ASSERT_OR_DIE(data && len > 0, "invalid data");
-    ASSERT_OR_DIE(out, "null output buffer");
-    ASSERT_OR_DIE(out_size >= len * 2 + 1, "hex buffer too small");
+bool bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size) {
+    if (!data || len == 0 || !out) return false;
+    if (out_size == 0 || len > (out_size - 1) / 2) return false;
     for (size_t i = 0; i < len; i++) {
         int res = snprintf(out + i * 2, 3, "%02x", data[i]);
-        ASSERT_OR_DIE(res > 0 && (size_t)res < 3, "hex formatting failed");
+        if (res < 0 || (size_t)res >= 3) return false;
     }
     out[len * 2] = '\0';
+    return true;
 }
 
-void hex_to_bytes(const char* hex, char* out, size_t out_size) {
-    ASSERT_OR_DIE(hex, "null hex input");
-    ASSERT_OR_DIE(out, "null output buffer");
-    size_t hex_len = strlen(hex);
-    ASSERT_OR_DIE(hex_len % 2 == 0, "hex string must have even length");
-    ASSERT_OR_DIE(out_size == hex_len / 2, "output buffer size incorrect");
+static int hex_digit_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+bool hex_to_bytes(const char* hex, size_t hex_len, uint8_t* out, size_t out_size) {
+    if ((hex_len & 1u) || !out || out_size < hex_len / 2) return false;
+    if (hex_len && !hex) return false;
 
     for (size_t i = 0; i < hex_len / 2; i++) {
-        unsigned int byte;
-        int          res = sscanf(hex + i * 2, "%2x", &byte);
-        ASSERT_OR_DIE(res == 1, "hex parsing failed");
-        out[i] = (char)byte;
+        int hi = hex_digit_val(hex[2 * i]);
+        int lo = hex_digit_val(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
     }
+    return true;
 }
 
 void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t out_len) {
@@ -82,6 +102,18 @@ void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t ou
     }
 
     secure_memzero(seed, sizeof(seed));
+}
+
+void utils_bit_window(const uint8_t* src, size_t from, unsigned n, uint8_t* out) {
+    ASSERT_OR_DIE(src && out, "utils_bit_window: null buffer");
+    ASSERT_OR_DIE(n > 0 && n <= 64, "utils_bit_window: bad bit count (%u)", n);
+
+    memset(out, 0, (n + 7u) / 8u);
+    for (unsigned i = 0; i < n; i++) {
+        const size_t  bit = from + i;
+        const uint8_t one = (uint8_t)((src[bit >> 3] >> (7 - (bit & 7u))) & 1u);
+        out[i >> 3] |= (uint8_t)(one << (7 - (i & 7u)));
+    }
 }
 
 bool utils_word_count_valid(unsigned wc) { return wc == 12 || wc == 24; }

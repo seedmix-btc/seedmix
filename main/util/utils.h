@@ -27,21 +27,28 @@ extern "C" {
 void secure_memzero(void* ptr, size_t len);
 
 /**
- * @brief Format bytes as lowercase hex.
+ * @brief Format bytes as lowercase hex (non-fatal).
  * @param data      Input bytes.
- * @param len       Number of bytes.
+ * @param len       Number of bytes (must be > 0).
  * @param out       Output buffer (at least len * 2 + 1 chars).
  * @param out_size  Size of `out` in bytes.
+ * @return true on success; false if @p data is NULL, @p len is 0,
+ *         @p out is NULL, or @p out_size is too small.
  */
-void bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size);
+bool bytes_to_hex(const uint8_t* data, size_t len, char* out, size_t out_size);
 
 /**
- * @brief Parse a hex string into bytes.
- * @param hex       Input hex string (must have even length).
- * @param out       Output buffer (must have size exactly strlen(hex) / 2).
+ * @brief Parse hex characters into bytes (non-fatal).
+ *
+ * @param hex       Input hex characters (at least @p hex_len chars).
+ * @param hex_len   Number of hex characters (must be even).
+ * @param out       Output buffer (at least @p hex_len / 2 bytes).
  * @param out_size  Size of `out` in bytes.
+ * @return true on success; false if @p hex is NULL (when @p hex_len > 0),
+ *         @p out is NULL, @p hex_len is odd, @p out_size is too small, or
+ *         any character is not a hex digit.
  */
-void hex_to_bytes(const char* hex, char* out, size_t out_size);
+bool hex_to_bytes(const char* hex, size_t hex_len, uint8_t* out, size_t out_size);
 
 /**
  * @brief Deterministically expand @p data into @p out_len bytes using
@@ -57,6 +64,15 @@ void hex_to_bytes(const char* hex, char* out, size_t out_size);
  * @param out_len   Number of bytes to produce.
  */
 void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t out_len);
+
+/**
+ * @brief Copy @p n bits of @p src, starting at bit @p from, into @p out.
+ *
+ * Bits are numbered from the most significant bit of @p src[0]. The copy is
+ * left-aligned in @p out, which must hold ceil(n / 8) bytes; the spare bits of
+ * its last byte are zeroed.
+ */
+void utils_bit_window(const uint8_t* src, size_t from, unsigned n, uint8_t* out);
 
 /**
  * @brief True if @p wc is a supported mnemonic word count (12 or 24).

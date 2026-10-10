@@ -3,6 +3,7 @@
  * @brief Unity tests for main/crypto/mnemonic.c (uses the HAL random stub).
  */
 
+#include "crypto/bip39_wordlist.h"
 #include "crypto/mnemonic.h"
 #include "unity.h"
 
@@ -242,6 +243,48 @@ static void test_last_word_candidates_invalid(void) {
                out, 128));
 }
 
+static void test_word_indices_are_the_eleven_bits(void) {
+    // The BIP39 vector for all-zero entropy: eleven zero indices, then index 3.
+    uint8_t     zeros[16] = {0};
+    mnemonic_t* m0        = mnemonic_from_entropy(zeros, sizeof(zeros));
+    TEST_ASSERT_NOT_NULL(m0);
+    uint16_t idx[24];
+    TEST_ASSERT_EQUAL_UINT(12, (unsigned)mnemonic_word_indices(m0, idx, 24));
+    for (unsigned i = 0; i < 11; i++) TEST_ASSERT_EQUAL_UINT(0, idx[i]);
+    TEST_ASSERT_EQUAL_UINT(3, idx[11]);
+    TEST_ASSERT_EQUAL_STRING("about", bip39_wordlist_word(idx[11]));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)mnemonic_word_indices(m0, idx, 11)); // too small
+    mnemonic_discard(m0);
+
+    // Anything else: each index must be the eleven bits, and must pick the word.
+    uint8_t entropy[16];
+    for (unsigned i = 0; i < sizeof(entropy); i++) entropy[i] = (uint8_t)(0x5Au ^ (i * 17u));
+    mnemonic_t* m = mnemonic_from_entropy(entropy, sizeof(entropy));
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_EQUAL_UINT(12, (unsigned)mnemonic_word_indices(m, idx, 24));
+    for (unsigned i = 0; i + 1 < 12; i++) {
+        unsigned bits = 0;
+        for (unsigned b = 0; b < 11; b++) {
+            const unsigned bit = 11u * i + b;
+            bits               = (bits << 1) | ((entropy[bit / 8] >> (7 - (bit % 8))) & 1u);
+        }
+        TEST_ASSERT_EQUAL_UINT(bits, idx[i]);
+    }
+
+    char buf[512];
+    strncpy(buf, mnemonic_words(m), sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    unsigned n           = 0;
+    char*    saveptr     = NULL;
+    for (char* tok = strtok_r(buf, " ", &saveptr); tok; tok = strtok_r(NULL, " ", &saveptr)) {
+        TEST_ASSERT_TRUE(n < 12);
+        TEST_ASSERT_EQUAL_STRING(tok, bip39_wordlist_word(idx[n]));
+        n++;
+    }
+    TEST_ASSERT_EQUAL_UINT(12, n);
+    mnemonic_discard(m);
+}
+
 int main(void) {
     UNITY_BEGIN();
     mnemonic_init();
@@ -262,5 +305,6 @@ int main(void) {
     RUN_TEST(test_last_word_candidates_12);
     RUN_TEST(test_last_word_candidates_24);
     RUN_TEST(test_last_word_candidates_invalid);
+    RUN_TEST(test_word_indices_are_the_eleven_bits);
     return UNITY_END();
 }

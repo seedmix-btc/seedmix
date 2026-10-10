@@ -54,11 +54,12 @@ lv_obj_t* graphics_test_create(void) {
     lv_obj_set_style_radius(rect, 12, 0);
     lv_obj_align(rect, LV_ALIGN_BOTTOM_MID, 0, -26);
 
-    // Exit hint
+    // Exit hint (bottom-left, clear of the Back button the debug screen
+    // adds to this screen)
     lv_obj_t* hint = lv_label_create(scr);
-    lv_label_set_text(hint, "ENTER to exit");
+    lv_label_set_text(hint, "ENTER / Back to exit");
     lv_obj_set_style_text_color(hint, lv_color_hex(0x888888), 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 4, -4);
 
     return scr;
 }

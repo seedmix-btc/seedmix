@@ -15,7 +15,8 @@ extern "C" {
 #endif
 
 void ui_log_add(const char* fmt, ...) PRINTF_LIKE(1, 2);
-void ui_show_state(ui_cb_t on_back, const char* mnemonic_words);
+/** @brief Show the log with the current entropy above it (@p entropy_hex may be NULL). */
+void ui_show_state(ui_cb_t on_back, const char* entropy_hex);
 
 #ifdef __cplusplus
 }
