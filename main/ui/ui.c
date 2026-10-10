@@ -257,7 +257,7 @@ lv_obj_t* ui_add_title(lv_obj_t* parent, const char* text) {
     lv_obj_t* t = lv_label_create(parent);
     lv_label_set_text(t, text);
     lv_obj_set_style_text_color(t, lv_color_white(), 0);
-    lv_obj_set_style_text_font(t, ui_font(28), 0);
+    lv_obj_set_style_text_font(t, ui_font(24), 0);
     lv_obj_align(t, LV_ALIGN_TOP_MID, 0, ui_scale(15));
     return t;
 }
@@ -278,7 +278,7 @@ static const struct {
     uint8_t    font_px; // reference font size, scaled via ui_font()
 } btn_sizes[] = {
     [UI_BTN_SIZE_SMALL] = {80, 30, 14},  [UI_BTN_SIZE_MED] = {160, 44, 24},
-    [UI_BTN_SIZE_LARGE] = {200, 44, 24}, [UI_BTN_SIZE_WIDE] = {180, 44, 24},
+    [UI_BTN_SIZE_LARGE] = {220, 44, 24}, [UI_BTN_SIZE_WIDE] = {180, 44, 24},
     [UI_BTN_SIZE_HERO] = {360, 56, 28},
 };
 
@@ -506,18 +506,19 @@ void ui_show_word_count(ui_cb_t on_12, ui_cb_t on_24) {
     ui_swap_screen(s);
 }
 
-void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter, ui_cb_t on_other_source,
+void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter_mnemonic, ui_cb_t on_other_source,
                     ui_cb_t on_state, ui_cb_t on_finish, bool is_additional) {
     ASSERT_OR_DIE(on_generate, "null on_generate");
-    ASSERT_OR_DIE(on_enter, "null on_enter");
+    ASSERT_OR_DIE(on_enter_mnemonic, "null on_enter_mnemonic");
     ASSERT_OR_DIE(on_other_source, "null on_other_source");
     ASSERT_OR_DIE(on_state, "null on_state");
     ASSERT_OR_DIE(on_finish, "null on_finish");
 
     lv_obj_t* s = ui_make_screen();
-    ui_add_title(s, is_additional ? "Choose Additional Source" : "Choose Initial Source");
+    ui_add_title(s, is_additional ? "Choose Additional Entropy Source"
+                                  : "Choose Initial Entropy Source");
     ui_add_btn(s, "Generate Here", on_generate, UI_BTN_SIZE_LARGE, LV_ALIGN_CENTER, 0, -40);
-    ui_add_btn(s, "Enter Manually", on_enter, UI_BTN_SIZE_LARGE, LV_ALIGN_CENTER, 0, 30);
+    ui_add_btn(s, "Enter Mnemonic", on_enter_mnemonic, UI_BTN_SIZE_LARGE, LV_ALIGN_CENTER, 0, 30);
     ui_add_btn(s, "Other Source", on_other_source, UI_BTN_SIZE_LARGE, LV_ALIGN_CENTER, 0, 100);
 
     // state button (bottom-left)

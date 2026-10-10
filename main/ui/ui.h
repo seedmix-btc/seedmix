@@ -31,7 +31,7 @@ typedef enum {
 void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
                   lv_event_cb_t on_test_error);
 void ui_show_word_count(ui_cb_t on_12, ui_cb_t on_24);
-void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter, ui_cb_t on_other_source,
+void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter_mnemonic, ui_cb_t on_other_source,
                     ui_cb_t on_state, ui_cb_t on_finish, bool is_additional);
 void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_qr, ui_cb_t on_dice, ui_cb_t on_coins,
                           ui_cb_t on_touch, ui_cb_t on_back);

@@ -28,9 +28,27 @@
 #include <string.h>
 
 /* -- Workflow state --------------------------------------------------- */
-static mnemonic_t* current     = NULL;
-static unsigned    word_count  = 12;
-static qr_grid_t   exported_qr = {0};
+static uint8_t     current_entropy[32]; // the working seed (the first 16 or 32 bytes)
+static size_t      current_entropy_len = 0;
+static unsigned    word_count          = 12;
+static qr_grid_t   exported_qr         = {0};
+static mnemonic_t* final_mnemonic      = NULL; // the words, only while the final screen is up
+
+// Bring a mnemonic into existence only where words are really needed, and take
+// its entropy rather than keep it.
+static size_t mnemonic_take_entropy(mnemonic_t* m, uint8_t* out) {
+    if (!m) return 0;
+    const size_t elen = mnemonic_to_entropy(m, out);
+    mnemonic_discard(m);
+    return elen;
+}
+
+// Let the final screen's words go; discard() rejects a null mnemonic, and the
+// first time this runs there is nothing to let go of.
+static void final_mnemonic_wipe(void) {
+    if (final_mnemonic) mnemonic_discard(final_mnemonic);
+    final_mnemonic = NULL;
+}
 
 /* -- Forward declarations --------------------------------------------- */
 /* Where a decoded QR payload came from. The camera keeps streaming, so a
@@ -89,7 +107,7 @@ static void go_back_source(void);
 static void go_source(void);
 static void on_finish(void);
 static void on_finish_done(void);
-static void show_merge_screen(mnemonic_t* new_m, const char* source_desc);
+static void show_merge_screen(const uint8_t* new_entropy, size_t elen, const char* source_desc);
 static void on_we_ok(void);
 static void on_we_error_cancel(void);
 static void on_we_error_retry(void);
@@ -99,94 +117,117 @@ static void on_create_mnemonic(lv_event_t* e);
 static void on_test_error(lv_event_t* e);
 static void show_main_screen(void);
 
-static void on_generating_msg(const char* msg) {
-    ui_show_msg(msg);
-    ui_delay_ms(1500);
-}
+// Show the working seed as raw entropy; the words are only shown at the final
+// stage.
+static void show_entropy_screen(const uint8_t* entropy, size_t elen, mnemonic_type_t type,
+                                ui_cb_t on_ok) {
+    ASSERT_OR_DIE(entropy, "null entropy");
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
 
-// Show the current working seed as raw entropy; the mnemonic words are only
-// shown at the final stage.
-static void show_entropy_screen(mnemonic_t* m, mnemonic_type_t type, ui_cb_t on_ok) {
-    uint8_t ent[32];
-    size_t  elen = mnemonic_entropy_size(m);
-    mnemonic_to_entropy(m, ent);
     char hex[2 * 32 + 1];
-    ASSERT_OR_DIE(bytes_to_hex(ent, elen, hex, sizeof(hex)), "entropy hex buffer too small");
-    secure_memzero(ent, sizeof(ent));
+    ASSERT_OR_DIE(bytes_to_hex(entropy, elen, hex, sizeof(hex)), "entropy hex buffer too small");
     ui_show_entropy(hex, type, on_ok);
     secure_memzero(hex, sizeof(hex)); // the screen keeps its own copy
 }
 
-// Combine `m` into `current` if the word counts match, otherwise discard `m`
-// and return to the source screen
-static void merge_or_reject(mnemonic_t* m, mnemonic_type_t result_type, const char* source_desc) {
-    if (current && mnemonic_entropy_size(current) != mnemonic_entropy_size(m)) {
+// Combine `entropy` into the working seed if the sizes match, otherwise drop it
+// and return to the source screen.
+static void merge_or_reject(const uint8_t* entropy, size_t elen, mnemonic_type_t result_type,
+                            const char* source_desc) {
+    ASSERT_OR_DIE(entropy, "null source entropy");
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected source entropy length");
+
+    if (current_entropy_len && current_entropy_len != elen) {
         ui_log_add("rejected %s: bit count mismatch", source_desc);
-        mnemonic_discard(m);
-        ui_show_msg("Word count mismatch - mnemonic discarded");
+        ui_show_msg("Seed size mismatch - input discarded");
         ui_delay_ms(1500);
         go_source();
         return;
     }
-    if (current) {
-        show_merge_screen(m, source_desc);
-    } else {
-        current = m;
-        ui_log_add("started with %s", source_desc);
-        show_entropy_screen(current, result_type, go_source);
+    if (current_entropy_len) {
+        show_merge_screen(entropy, elen, source_desc);
+        return;
     }
+    memcpy(current_entropy, entropy, elen);
+    current_entropy_len = elen;
+    ui_log_add("started with %s", source_desc);
+    show_entropy_screen(current_entropy, current_entropy_len, result_type, go_source);
 }
 
 static void on_generate(void) {
-    ui_show_msg("Generating words...");
+    const size_t elen = utils_word_count_bytes(word_count); // 16 or 32
+    ASSERT_OR_DIE(elen <= sizeof(current_entropy), "entropy length too large");
+
+    char msg[96];
+    int  res = snprintf(msg, sizeof(msg), "Generating %u bytes of entropy from %s...",
+                       (unsigned)elen, hal_get_random_source());
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(msg), "generate message too long");
+    ui_show_msg(msg);
     ui_delay_ms(500);
-    mnemonic_t* m = mnemonic_generate(word_count, on_generating_msg);
-    char        desc[64];
-    int         res = snprintf(desc, sizeof(desc), "generated %u bits from %s",
-                       utils_word_count_bits(word_count), hal_get_random_source());
+
+    uint8_t entropy[32];
+    hal_get_random(entropy, elen);
+
+    char desc[64];
+    res = snprintf(desc, sizeof(desc), "generated %u bits from %s",
+                   utils_word_count_bits(word_count), hal_get_random_source());
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    secure_memzero(entropy, sizeof(entropy));
 }
 
-static word_entry_handle_t we_handle   = NULL;
-static mnemonic_t*         pending_new = NULL;
+static word_entry_handle_t we_handle = NULL;
+static uint8_t             pending_entropy[32]; // the source waiting to be merged in
+static size_t              pending_entropy_len = 0;
 static char                pending_desc[64];
 static char                we_entered[MNEMONIC_MAX_INPUT_LEN];
 
 static void on_enter_manual(void);
 static void on_we_complete(void);
 
+static void pending_wipe(void) {
+    secure_memzero(pending_entropy, sizeof(pending_entropy));
+    pending_entropy_len = 0;
+}
+
 static void on_merge_done(void) {
-    ASSERT_OR_DIE(pending_new, "no pending mnemonic");
-    // The merge screen already showed the merged entropy, so just commit.
-    // Scrub it now: its delete is deferred until the next screen is swapped in.
+    ASSERT_OR_DIE(pending_entropy_len, "no pending entropy");
+    ASSERT_OR_DIE(pending_entropy_len == current_entropy_len, "merge size mismatch");
+
+    // The merge screen already showed the result, so just commit it. Scrubbing
+    // now: its delete is deferred until the next screen is swapped in.
     ui_scrub_screen(lv_screen_active());
-    current     = mnemonic_combine(current, pending_new);
-    pending_new = NULL;
+    for (size_t i = 0; i < current_entropy_len; i++) {
+        current_entropy[i] ^= pending_entropy[i];
+    }
+    pending_wipe();
     ui_log_add("merged with %s", pending_desc);
+    secure_memzero(pending_desc, sizeof(pending_desc));
     go_source();
 }
 
-static void show_merge_screen(mnemonic_t* new_m, const char* source_desc) {
-    uint8_t ca[32], na[32], ma[32];
-    size_t  elen = mnemonic_entropy_size(current);
-    mnemonic_to_entropy(current, ca);
-    mnemonic_to_entropy(new_m, na);
-    for (size_t i = 0; i < elen; i++) ma[i] = ca[i] ^ na[i];
+static void show_merge_screen(const uint8_t* new_entropy, size_t elen, const char* source_desc) {
+    ASSERT_OR_DIE(new_entropy, "null merge entropy");
+    ASSERT_OR_DIE(elen == current_entropy_len, "merge size mismatch");
+
+    uint8_t merged[32];
+    for (size_t i = 0; i < elen; i++) merged[i] = current_entropy[i] ^ new_entropy[i];
 
     char ca_hex[2 * 32 + 1], na_hex[2 * 32 + 1], ma_hex[2 * 32 + 1];
-    ASSERT_OR_DIE(bytes_to_hex(ca, elen, ca_hex, sizeof(ca_hex)), "merge hex buffer too small");
-    ASSERT_OR_DIE(bytes_to_hex(na, elen, na_hex, sizeof(na_hex)), "merge hex buffer too small");
-    ASSERT_OR_DIE(bytes_to_hex(ma, elen, ma_hex, sizeof(ma_hex)), "merge hex buffer too small");
+    ASSERT_OR_DIE(bytes_to_hex(current_entropy, elen, ca_hex, sizeof(ca_hex)),
+                  "merge hex buffer too small");
+    ASSERT_OR_DIE(bytes_to_hex(new_entropy, elen, na_hex, sizeof(na_hex)),
+                  "merge hex buffer too small");
+    ASSERT_OR_DIE(bytes_to_hex(merged, elen, ma_hex, sizeof(ma_hex)), "merge hex buffer too small");
 
-    secure_memzero(ma, sizeof(ma));
-    secure_memzero(na, sizeof(na));
-    secure_memzero(ca, sizeof(ca));
+    secure_memzero(merged, sizeof(merged));
 
-    pending_new = new_m;
+    memcpy(pending_entropy, new_entropy, elen);
+    pending_entropy_len = elen;
     snprintf(pending_desc, sizeof(pending_desc), "%s", source_desc);
 
-    // The result mnemonic is only revealed on the screen shown after Ok.
+    // The result is only acted on when the Ok button is pressed.
     ui_show_merge_process(ca_hex, na_hex, ma_hex, on_merge_done);
 
     // Wipe the hex renderings after use
@@ -199,7 +240,7 @@ static void on_we_cancel(void) {
     ui_word_entry_discard(we_handle);
     we_handle = NULL;
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 static void on_enter_manual(void) {
@@ -557,13 +598,11 @@ static void on_camera_use(void) {
     sha256_expand(camera_frame.data, camera_frame.size, entropy, elen);
     camera_release();
 
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
-
     char desc[48];
     res = snprintf(desc, sizeof(desc), "camera image %u bits", utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    secure_memzero(entropy, sizeof(entropy));
 }
 
 static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_t* gray) {
@@ -659,11 +698,16 @@ static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t
 
     camera_feed_stop();
 
-    unsigned wc = (mnemonic_entropy_size(m) == 32) ? 24 : 12;
+    uint8_t      entropy[32];
+    const size_t elen = mnemonic_take_entropy(m, entropy); // the words are not kept
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected SeedQR entropy length");
+
+    unsigned wc = (elen == 32) ? 24 : 12;
     char     desc[48];
     int      res = snprintf(desc, sizeof(desc), "scanned %u-bit SeedQR", utils_word_count_bits(wc));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_ENTERED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, desc);
+    secure_memzero(entropy, sizeof(entropy));
     return true;
 }
 
@@ -1019,13 +1063,13 @@ static bool on_tx_payload(qr_source_t source, const uint8_t* payload, size_t ple
 }
 
 static void on_export_seedqr(void) {
-    if (!current) {
+    if (!final_mnemonic) {
         ui_go_main();
         return;
     }
 
     uint8_t entropy[32];
-    size_t  n = seedqr_compact_encode(current, entropy, sizeof(entropy));
+    size_t  n = seedqr_compact_encode(final_mnemonic, entropy, sizeof(entropy));
     ASSERT_OR_DIE(n == 16 || n == 32, "unexpected entropy length");
 
     if (!qr_encode(entropy, n, QR_MODE_BYTE, &exported_qr)) {
@@ -1051,15 +1095,16 @@ static uint16_t        bits_indices[24];
 static char            bits_hex[2 * 32 + 1];
 static mnemonic_bits_t bits_bundle;
 
-// NULL when there is no mnemonic yet; the buffers stay valid until bits_wipe().
+// NULL when there are no words yet; the buffers stay valid until bits_wipe().
 static const mnemonic_bits_t* current_bits(void) {
-    if (!current) return NULL;
+    if (!final_mnemonic) return NULL;
 
-    const size_t elen = mnemonic_to_entropy(current, bits_entropy);
+    const size_t elen = current_entropy_len;
     ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+    memcpy(bits_entropy, current_entropy, elen);
     ASSERT_OR_DIE(bytes_to_hex(bits_entropy, elen, bits_hex, sizeof(bits_hex)),
                   "entropy hex buffer too small");
-    const unsigned count = (unsigned)mnemonic_word_indices(current, bits_indices, 24);
+    const unsigned count = (unsigned)mnemonic_word_indices(final_mnemonic, bits_indices, 24);
     ASSERT_OR_DIE(count == 12 || count == 24, "unexpected word count");
 
     bits_bundle.entropy_hex = bits_hex;
@@ -1080,9 +1125,15 @@ static void on_words_help(void) { ui_show_words_help(on_words_help_close); }
 static void on_words_help_close(void) { show_final_screen(); }
 
 static void show_final_screen(void) {
-    ASSERT_OR_DIE(current, "no mnemonic to show");
-    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_FINAL, on_finish_done, on_export_seedqr,
-                     on_words_help, current_bits());
+    ASSERT_OR_DIE(current_entropy_len == 16 || current_entropy_len == 32, "no seed to show");
+
+    // The words exist for this screen and nowhere else.
+    final_mnemonic_wipe();
+    final_mnemonic = mnemonic_from_entropy(current_entropy, current_entropy_len);
+    ASSERT_OR_DIE(final_mnemonic, "mnemonic from entropy failed");
+
+    ui_show_mnemonic(mnemonic_words(final_mnemonic), MNEMONIC_TYPE_FINAL, on_finish_done,
+                     on_export_seedqr, on_words_help, current_bits());
 }
 
 /* -- Dice roll entropy source ---------------------------------------- */
@@ -1104,8 +1155,6 @@ static void on_dice_roll(uint8_t value) {
     uint8_t  entropy[32];
     size_t   elen = dice_entropy_derive(dice, entropy, sizeof(entropy));
     ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
     dice_entropy_discard(dice);
     dice = NULL;
 
@@ -1113,7 +1162,8 @@ static void on_dice_roll(uint8_t value) {
     int  res = snprintf(desc, sizeof(desc), "d%u dice %u bits (%u rolls)", sides,
                        utils_word_count_bits(word_count), rolls);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    secure_memzero(entropy, sizeof(entropy));
 }
 
 // (Re)build the dice screen from the live session, so returning from the help
@@ -1174,8 +1224,6 @@ static void on_coin_flip(uint8_t value) {
     uint8_t  entropy[32];
     size_t   elen = coin_entropy_derive(coin, entropy, sizeof(entropy));
     ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
     coin_entropy_discard(coin);
     coin = NULL;
 
@@ -1183,7 +1231,8 @@ static void on_coin_flip(uint8_t value) {
     int  res = snprintf(desc, sizeof(desc), "coin flips %u bits (%u flips)",
                        utils_word_count_bits(word_count), flips);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    secure_memzero(entropy, sizeof(entropy));
 }
 
 static void on_coin_cancel(void) {
@@ -1259,18 +1308,18 @@ static void on_touch_continue(void) {
     ASSERT_OR_DIE(touch, "no active touch session");
     ASSERT_OR_DIE(touch_seed_len == 16 || touch_seed_len == 32, "no touch seed to use");
     const unsigned taps = touch_entropy_taps(touch);
+    const size_t   elen = touch_seed_len;
 
-    mnemonic_t* m = mnemonic_from_entropy(touch_seed, touch_seed_len);
-    secure_memzero(touch_seed, sizeof(touch_seed));
-    touch_seed_len = 0;
     touch_entropy_discard(touch);
-    touch = NULL;
+    touch          = NULL;
+    touch_seed_len = 0;
 
     char desc[48];
     int  res = snprintf(desc, sizeof(desc), "touch screen %u bits (%u taps)",
                        utils_word_count_bits(word_count), taps);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(touch_seed, elen, MNEMONIC_TYPE_GENERATED, desc);
+    secure_memzero(touch_seed, sizeof(touch_seed));
 }
 
 static void on_touch_help_close(void) { show_touch_screen(); }
@@ -1326,25 +1375,37 @@ static void on_we_complete(void) {
                        utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
 
-    // Show the completed mnemonic and ask the user to confirm before it is
-    // used
-    pending_new = m;
-    show_entropy_screen(m, MNEMONIC_TYPE_ENTERED, on_we_ok);
+    // The words were only a way to reach the entropy, which is what is kept.
+    uint8_t entropy[32];
+    size_t  elen = mnemonic_take_entropy(m, entropy);
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+    memcpy(pending_entropy, entropy, elen);
+    pending_entropy_len = elen;
+    secure_memzero(entropy, sizeof(entropy));
+
+    // Show the entered seed and ask the user to confirm before it is used.
+    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, on_we_ok);
 }
 
 static void on_we_ok(void) {
-    ASSERT_OR_DIE(pending_new, "no pending mnemonic");
-    mnemonic_t* m = pending_new;
-    pending_new   = NULL;
+    ASSERT_OR_DIE(pending_entropy_len, "no pending entropy");
 
-    if (!current) {
-        // First source: the entered mnemonic was already shown for approval.
-        current = m;
+    uint8_t      entropy[32];
+    const size_t elen = pending_entropy_len;
+    memcpy(entropy, pending_entropy, elen);
+    pending_wipe();
+
+    if (!current_entropy_len) {
+        // First source: the entered seed was already shown for approval.
+        memcpy(current_entropy, entropy, elen);
+        current_entropy_len = elen;
         ui_log_add("started with %s", pending_desc);
+        secure_memzero(pending_desc, sizeof(pending_desc));
         go_source();
         return;
     }
-    merge_or_reject(m, MNEMONIC_TYPE_ENTERED, pending_desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, pending_desc);
+    secure_memzero(entropy, sizeof(entropy));
 }
 
 static void on_we_error_cancel(void) { go_source(); }
@@ -1410,37 +1471,51 @@ static void on_we_word_selected(const char* last_word) {
     res = snprintf(pending_desc, sizeof(pending_desc), "entered %u bits (chosen last word)",
                    utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
-    pending_new = m;
-    show_entropy_screen(m, MNEMONIC_TYPE_ENTERED, on_we_ok);
+
+    uint8_t entropy[32];
+    size_t  elen = mnemonic_take_entropy(m, entropy);
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+    memcpy(pending_entropy, entropy, elen);
+    pending_entropy_len = elen;
+    secure_memzero(entropy, sizeof(entropy));
+
+    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, on_we_ok);
 }
 
 // -- Re-enter source with correct title based on state -----------------
 static void go_source(void) {
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 static void go_back_source(void) {
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 /* -- Step: word count chosen ------------------------------------------ */
 static void on_12(void) {
     word_count = 12;
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 static void on_24(void) {
     word_count = 24;
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 /* -- State screen ----------------------------------------------------- */
 static void on_show_state(void) {
-    const mnemonic_bits_t* bits = current_bits();
-    ui_show_state(go_back_source, bits ? bits->entropy_hex : NULL);
+    char        hex[2 * 32 + 1];
+    const char* p = NULL;
+    if (current_entropy_len) {
+        ASSERT_OR_DIE(bytes_to_hex(current_entropy, current_entropy_len, hex, sizeof(hex)),
+                      "entropy hex buffer too small");
+        p = hex;
+    }
+    ui_show_state(go_back_source, p);
+    secure_memzero(hex, sizeof(hex));
 }
 
 static void on_finish_done(void) {
@@ -1449,14 +1524,17 @@ static void on_finish_done(void) {
         we_handle = NULL;
     }
     secure_memzero(we_entered, sizeof(we_entered));
-    mnemonic_discard(current);
-    current = NULL;
+    final_mnemonic_wipe();
+    secure_memzero(current_entropy, sizeof(current_entropy));
+    current_entropy_len = 0;
+    pending_wipe();
+    secure_memzero(pending_desc, sizeof(pending_desc));
     bits_wipe();
     ui_go_main();
 }
 
 static void on_finish(void) {
-    if (!current) {
+    if (!current_entropy_len) {
         ui_go_main();
         return;
     }
@@ -1467,7 +1545,7 @@ static void on_finish(void) {
 /* -- Entry: "Create Mnemonic Seed" button --------------------------------------- */
 static void on_create_mnemonic(lv_event_t* e) {
     (void)e;
-    ASSERT_OR_DIE(!current, "current mnemonic should be NULL");
+    ASSERT_OR_DIE(!current_entropy_len, "working seed should be empty");
     ASSERT_OR_DIE(!we_handle, "word entry handle should be NULL");
     ui_show_word_count(on_12, on_24);
 }
