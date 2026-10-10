@@ -130,11 +130,33 @@ static void test_secure_memzero(void) {
     }
 }
 
+static void test_bit_window(void) {
+    const uint8_t src[2] = {0xA5, 0xF0}; // 1010 0101 1111 0000
+    uint8_t       out[2];
+
+    utils_bit_window(src, 0, 8, out);
+    TEST_ASSERT_EQUAL_UINT8(0xA5, out[0]);
+
+    utils_bit_window(src, 8, 8, out);
+    TEST_ASSERT_EQUAL_UINT8(0xF0, out[0]);
+
+    utils_bit_window(src, 4, 8, out); // 0101 1111
+    TEST_ASSERT_EQUAL_UINT8(0x5F, out[0]);
+
+    utils_bit_window(src, 0, 12, out); // left aligned, spare bits clear
+    TEST_ASSERT_EQUAL_UINT8(0xA5, out[0]);
+    TEST_ASSERT_EQUAL_UINT8(0xF0, out[1]);
+
+    utils_bit_window(src, 9, 3, out); // 111 -> 1110 0000
+    TEST_ASSERT_EQUAL_UINT8(0xE0, out[0]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_word_count_valid);
     RUN_TEST(test_word_count_bits_and_bytes);
     RUN_TEST(test_floor_log2);
+    RUN_TEST(test_bit_window);
     RUN_TEST(test_bytes_to_hex);
     RUN_TEST(test_hex_to_bytes);
     RUN_TEST(test_sha256_expand_deterministic_and_prefix);

@@ -612,7 +612,7 @@ void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back) {
     for (size_t i = 0; i < sizeof(sides) / sizeof(sides[0]); i++) {
         int  row = (int)(i / 3);
         int  col = (int)(i % 3);
-        char face[8];
+        char face[12];
         snprintf(face, sizeof(face), "%u", sides[i]);
 
         lv_obj_t* b = lv_button_create(s);
@@ -842,7 +842,7 @@ void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_
     lv_obj_set_scroll_dir(grid, LV_DIR_VER);
 
     for (unsigned v = 1; v <= sides; v++) {
-        char face[8];
+        char face[12];
         snprintf(face, sizeof(face), "%u", v);
 
         lv_obj_t* b = lv_button_create(grid);
@@ -864,7 +864,7 @@ void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_
 void ui_dice_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
                           uint32_t needed, unsigned last_roll, uint32_t last_bits) {
     ASSERT_OR_DIE(bytes, "null bytes");
-    char face[8];
+    char face[12];
     snprintf(face, sizeof(face), "%u", last_roll);
     meter_set(&dice_meter, bytes, count, filled_bits, needed, face, last_bits);
 }
@@ -1212,7 +1212,7 @@ void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel, ui_cb_t on_help
 void ui_touch_screen_set_progress(const uint8_t* bytes, uint32_t bits, uint32_t target_bits,
                                   unsigned taps, unsigned last_tile) {
     ASSERT_OR_DIE(bytes, "null bytes");
-    char face[8];
+    char face[12];
     snprintf(face, sizeof(face), "%u", last_tile); // the tile's number, 0..63
     meter_set(&touch_meter, bytes, taps, bits, target_bits, face, TOUCH_BITS_PER_TAP);
     touch_light_tile(last_tile);
@@ -1947,7 +1947,8 @@ void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on
     ui_show_text_screen(title, body, NULL, "Continue", on_continue, "Cancel", on_cancel);
 }
 
-void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export) {
+void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export,
+                      ui_cb_t on_help, const mnemonic_bits_t* bits) {
     ASSERT_OR_DIE(words, "null words");
     ASSERT_OR_DIE(on_ok, "null on_ok");
 
@@ -1973,6 +1974,9 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
     }
     ui_add_title(s, title);
 
+    // Top-right: the footer is spoken for, and the title only reaches the middle.
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_RIGHT, -10, 5);
+
     if (show_warning) {
         lv_obj_t* w = lv_label_create(s);
         lv_label_set_text(w, "Write these words down.\nNever share them!");
@@ -1982,22 +1986,58 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
         lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(55));
     }
 
+    // Everything under the title hangs off the block above it, so the grid lands
+    // wherever the warning and the entropy line leave room.
+    lv_obj_t* anchor = NULL;
+    if (show_warning) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, "Write these words down.\nNever share them!");
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(14), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(55));
+        anchor = w;
+    }
+
+    // The entropy the words were cut from, back at the top of the final screen.
+    if (bits && bits->entropy_hex) {
+        lv_obj_t* ent = lv_label_create(s);
+        lv_label_set_text(ent, bits->entropy_hex);
+        lv_obj_set_style_text_color(ent, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(ent, ui_font(12), 0);
+        lv_obj_set_style_text_align(ent, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(ent, ui_scale(440));
+        lv_label_set_long_mode(ent, LV_LABEL_LONG_WRAP);
+        if (anchor)
+            lv_obj_align_to(ent, anchor, LV_ALIGN_OUT_BOTTOM_MID, 0, ui_scale(6));
+        else
+            lv_obj_align(ent, LV_ALIGN_TOP_MID, 0, ui_scale(55));
+        anchor = ent;
+    }
+
     lv_obj_t* grid = ui_mnemonic_view_create(s);
-    lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, ui_scale(show_warning ? 85 : 55));
-    ui_mnemonic_view_set_words(grid, words);
+    if (anchor)
+        lv_obj_align_to(grid, anchor, LV_ALIGN_OUT_BOTTOM_MID, 0, ui_scale(8));
+    else
+        lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, ui_scale(55));
+    ui_mnemonic_view_set_words(grid, words, bits);
     lv_obj_update_layout(grid);
 
-    if (ui_small_screen()) {
-        lv_coord_t top   = ui_scale(show_warning ? 85 : 55);
-        lv_coord_t max_h = LV_VER_RES - top - ui_scale(76);
+    // Cap the grid so the footer stays reachable, and let it scroll when 24 words
+    // with their bits do not fit.
+    {
+        const lv_coord_t top   = lv_obj_get_y(grid);
+        lv_coord_t       max_h = LV_VER_RES - top - ui_scale(76);
         if (max_h < ui_scale(40)) max_h = ui_scale(40);
         if (lv_obj_get_height(grid) > max_h) {
             lv_obj_set_height(grid, max_h);
             lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_scroll_dir(grid, LV_DIR_VER);
+            if (ui_small_screen()) {
+                lv_obj_t* arrows = ui_add_scroll_arrows(s, grid, ui_scale(30));
+                lv_obj_align_to(arrows, grid, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
+            }
         }
-        lv_obj_t* arrows = ui_add_scroll_arrows(s, grid, ui_scale(30));
-        lv_obj_align_to(arrows, grid, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
     }
 
     if (on_export) {
@@ -2007,6 +2047,92 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
         lv_obj_t* ok = ui_add_btn(s, "Ok", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_CENTER, 0, 0);
         lv_obj_align_to(ok, grid, LV_ALIGN_OUT_BOTTOM_MID, 0, ui_scale(12));
     }
+
+    ui_swap_screen(s);
+}
+
+/* -- Words from bits (help) -------------------------------------------- */
+// Two example blocks for a word and for the short last word of each seed size.
+// Static: the blocks have to outlive the screen.
+static bitvis_roll_t help_word;
+static bitvis_roll_t help_last12;
+static bitvis_roll_t help_last24;
+
+void ui_show_words_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Words from Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so leave
+    // room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bit blocks below are opaque RGB565
+    // buffers with black backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. Eleven bits become one word.
+    help_section(cont, "Eleven bits pick a word",
+                 "The entropy is read from the front, eleven bits at a time, and each group is a"
+                 " number from 0 to 2047. That number is the index of the word in the BIP39 list"
+                 " of 2048, which is why the words look nothing like the bits they came from.");
+    bitvis_roll_create(&help_word, cont, s, 11);
+    {
+        // Eleven bits worth 1: the second word of the list.
+        const uint8_t example[2] = {0x00, 0x20};
+        bitvis_roll_set(&help_word, "", example, 11, 11);
+    }
+    help_text(cont, "00000000001 -> 1 -> ability", 12, 0x888888);
+
+    // 2. The last word is short: the checksum takes the rest of its eleven bits.
+    help_section(cont, "The last word carries the checksum",
+                 "Eleven bits a word does not divide the seed exactly. A 128-bit seed is eleven"
+                 " words and seven bits, so the twelfth takes those seven and four more that are a"
+                 " checksum over the seed. A 256-bit seed is twenty-three words and three bits, so"
+                 " the twenty-fourth takes three and eight. Those cells are drawn dark, and the"
+                 " word's number and bits are green: they are not seed material, they are what"
+                 " proves the words were copied down correctly.");
+    {
+        lv_obj_t* row = help_row(cont);
+
+        const uint8_t last12[2] = {0xB0, 0x00}; // seven entropy bits
+        bitvis_roll_create(&help_last12, row, s, 11);
+        bitvis_roll_set(&help_last12, "128", last12, 7, 7);
+
+        const uint8_t last24[2] = {0x60, 0x00}; // three entropy bits
+        bitvis_roll_create(&help_last24, row, s, 11);
+        bitvis_roll_set(&help_last24, "256", last24, 3, 3);
+    }
+    help_text(cont, "the last word of a 128-bit seed, and of a 256-bit one", 12, 0x888888);
+
+    // 3. Where it can be seen for real.
+    help_section(cont, "Where you see it",
+                 "Every word box on the words screen carries the eleven bits that picked its word"
+                 " and the index they make, so any word can be followed back to its bits.");
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
 }

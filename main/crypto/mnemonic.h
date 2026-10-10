@@ -51,6 +51,20 @@ size_t mnemonic_to_entropy(const mnemonic_t* m, uint8_t* out);
 size_t mnemonic_entropy_size(const mnemonic_t* m);
 
 /**
+ * @brief Read the eleven-bit word list index of every word, in order.
+ *
+ * Index i is what picks word i+1 out of the 2048-word list. The last index also
+ * carries the checksum bits, which is why it has to be read from the words and
+ * not from the entropy alone.
+ *
+ * @param m       Mnemonic to read.
+ * @param out     Receives one index per word (12 or 24 entries).
+ * @param out_cap How many entries @p out holds.
+ * @return        Number of indices written, or 0 on a bad word count or lookup.
+ */
+size_t mnemonic_word_indices(const mnemonic_t* m, uint16_t* out, size_t out_cap);
+
+/**
  * @brief XOR the entropy of two mnemonics (must have the same word count).
  *        The result is a new mnemonic.  Both inputs are discarded.
  */

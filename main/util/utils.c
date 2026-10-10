@@ -104,6 +104,18 @@ void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t ou
     secure_memzero(seed, sizeof(seed));
 }
 
+void utils_bit_window(const uint8_t* src, size_t from, unsigned n, uint8_t* out) {
+    ASSERT_OR_DIE(src && out, "utils_bit_window: null buffer");
+    ASSERT_OR_DIE(n > 0 && n <= 64, "utils_bit_window: bad bit count (%u)", n);
+
+    memset(out, 0, (n + 7u) / 8u);
+    for (unsigned i = 0; i < n; i++) {
+        const size_t  bit = from + i;
+        const uint8_t one = (uint8_t)((src[bit >> 3] >> (7 - (bit & 7u))) & 1u);
+        out[i >> 3] |= (uint8_t)(one << (7 - (i & 7u)));
+    }
+}
+
 bool utils_word_count_valid(unsigned wc) { return wc == 12 || wc == 24; }
 
 unsigned utils_word_count_bits(unsigned wc) {

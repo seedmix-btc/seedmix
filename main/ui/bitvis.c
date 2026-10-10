@@ -481,6 +481,9 @@ typedef struct {
     size_t         buf_bytes;
     lv_coord_t     w, h, cell, gap, pad;
     unsigned       cells;
+    uint8_t        win[2]; // the bits the block shows, left-aligned
+    unsigned       nbits;
+    uint16_t       col_on, col_off;
     char           label[8];
     lv_obj_t*      screen;
 } rollview_t;
@@ -493,6 +496,21 @@ static void xrv_chrome(rollview_t* r) {
     if (!n) return;
     lv_coord_t lw = (lv_coord_t)n * XV_LABEL_STEP - 1;
     xv_text(r->buf, r->w, r->h, (r->w - lw) / 2, 1, r->label, XV_HEX);
+}
+
+/* Draw the bits, most significant first; the cells past them stay unknown. */
+static void xrv_bits(rollview_t* r) {
+    lv_coord_t strip_w = (lv_coord_t)r->cells * r->cell + (lv_coord_t)(r->cells - 1) * r->gap;
+    lv_coord_t x       = (r->w - strip_w) / 2;
+    for (unsigned b = 0; b < r->cells; b++) {
+        uint16_t color = XV_BIT_DIM;
+        if (b < r->nbits) {
+            color = ((r->win[b >> 3] >> (7 - (b & 7u))) & 1u) ? r->col_on : r->col_off;
+        }
+        xv_fill(r->buf, r->w, r->h, x + (lv_coord_t)b * (r->cell + r->gap), XV_BIT_Y, r->cell,
+                r->cell, color);
+    }
+    if (r->img) lv_obj_invalidate(r->img);
 }
 
 static void xrv_cleanup(lv_event_t* e) {
@@ -510,7 +528,7 @@ static void xrv_cleanup(lv_event_t* e) {
 
 void bitvis_roll_create(bitvis_roll_t* h, lv_obj_t* parent, lv_obj_t* screen, unsigned cells) {
     ASSERT_OR_DIE(h && parent && screen, "bitvis: null argument");
-    ASSERT_OR_DIE(cells >= 1 && cells <= 8, "bitvis: bad roll cell count (%u)", cells);
+    ASSERT_OR_DIE(cells >= 1 && cells <= 16, "bitvis: bad roll cell count (%u)", cells);
 
     h->priv       = NULL;
     rollview_t* r = lv_malloc(sizeof(*r));
@@ -540,6 +558,8 @@ void bitvis_roll_create(bitvis_roll_t* h, lv_obj_t* parent, lv_obj_t* screen, un
 
     snprintf(r->label, sizeof(r->label), "--");
     xrv_chrome(r);
+    r->col_on  = XV_BIT_ON;
+    r->col_off = XV_BIT_OFF;
 
     r->img = lv_image_create(parent);
     ui_clickthrough(r->img); // a bit view never takes a tap
@@ -558,20 +578,21 @@ void bitvis_roll_set(bitvis_roll_t* h, const char* label, const uint8_t* bytes,
     ASSERT_OR_DIE(nbits <= filled_bits, "bitvis: bad roll bit count");
 
     snprintf(r->label, sizeof(r->label), "%s", label);
-    xrv_chrome(r);
 
-    // The roll's bits, most significant first; cells past it stay unknown.
-    lv_coord_t strip_w = (lv_coord_t)r->cells * r->cell + (lv_coord_t)(r->cells - 1) * r->gap;
-    lv_coord_t x       = (r->w - strip_w) / 2;
-    lv_coord_t bit_y   = XV_BIT_Y;
-    for (unsigned b = 0; b < r->cells; b++) {
-        uint16_t color = XV_BIT_DIM;
-        if (b < nbits) {
-            uint32_t bit = filled_bits - nbits + b;
-            color        = ((bytes[bit >> 3] >> (7 - (bit & 7u))) & 1u) ? XV_BIT_ON : XV_BIT_OFF;
-        }
-        xv_fill(r->buf, r->w, r->h, x + (lv_coord_t)b * (r->cell + r->gap), bit_y, r->cell, r->cell,
-                color);
-    }
-    if (r->img) lv_obj_invalidate(r->img);
+    // Keep the bits as a left-aligned window, so a colour change can repaint them
+    // without the caller handing them over again.
+    memset(r->win, 0, sizeof(r->win));
+    if (nbits) utils_bit_window(bytes, filled_bits - nbits, nbits, r->win);
+    r->nbits = nbits;
+
+    xrv_chrome(r);
+    xrv_bits(r);
+}
+
+void bitvis_roll_set_colors(bitvis_roll_t* h, uint16_t on, uint16_t off) {
+    if (!h || !h->priv) return; // the screen is gone
+    rollview_t* r = h->priv;
+    if (on) r->col_on = on;
+    if (off) r->col_off = off;
+    xrv_bits(r);
 }

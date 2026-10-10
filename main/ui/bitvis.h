@@ -83,7 +83,8 @@ typedef struct {
  * @brief Draw a roll readout of @p cells bit cells inside @p parent.
  *
  * @p cells should be as wide as the die's longest part, i.e. the most bits one
- * roll can contribute; a roll worth fewer shows just those bits. Drawn with
+ * roll can contribute (up to 16); a roll worth fewer shows just those bits, and
+ * the cells past them stay dark. Drawn with
  * the same cells, colours and font as the grid, so build it against the same
  * @p screen and it lines up with it.  @p r must outlive @p screen: its widgets
  * are released when @p screen is deleted, after which bitvis_roll_set() does
@@ -100,7 +101,15 @@ void bitvis_roll_create(bitvis_roll_t* r, lv_obj_t* parent, lv_obj_t* screen, un
  */
 void bitvis_roll_set(bitvis_roll_t* r, const char* label, const uint8_t* bytes,
                      uint32_t filled_bits, uint32_t nbits);
-
+/**
+ * @brief Colour a roll readout's bits, for a value that is not the input's own.
+ *
+ * The defaults are the grid palette (white ones, dark zeros). Use this when the
+ * bits are borrowed from somewhere else - the checksum in a mnemonic's last
+ * word, say - so a block reads as different at a glance. A colour of 0 keeps the
+ * current one. It stays until changed again.
+ */
+void bitvis_roll_set_colors(bitvis_roll_t* h, uint16_t on, uint16_t off);
 #ifdef __cplusplus
 }
 #endif

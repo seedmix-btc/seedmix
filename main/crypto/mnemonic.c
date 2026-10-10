@@ -30,6 +30,28 @@ struct mnemonic_t {
 
 static size_t entropy_len_valid(size_t len) { return len == 16 || len == 32; }
 
+// Split a mnemonic into words. Returns the number of words, or 0 if there are
+// not 12 or 24 of them (or one does not fit the buffer).
+static size_t mnemonic_split(const char* words, char toks[24][16]) {
+    size_t      n = 0;
+    const char* p = words;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        if (n >= 24) return 0; // too many words
+        size_t tlen = 0;
+        while (*p && *p != ' ' && tlen + 1 < sizeof(toks[n])) {
+            toks[n][tlen++] = *p++;
+        }
+        toks[n][tlen] = '\0';
+        while (*p && *p != ' ') p++; // skip any overlong token remainder
+
+        n++;
+    }
+    if (n != 12 && n != 24) return 0;
+    return n;
+}
+
 static mnemonic_t* mnemonic_alloc(char* words, size_t entropy_len) {
     ASSERT_OR_DIE(words, "null words");
     ASSERT_OR_DIE(entropy_len_valid(entropy_len), "entropy length must be 16 or 32");
@@ -119,6 +141,24 @@ size_t mnemonic_to_entropy(const mnemonic_t* m, uint8_t* out) {
     return written;
 }
 
+size_t mnemonic_word_indices(const mnemonic_t* m, uint16_t* out, size_t out_cap) {
+    if (!m || !m->words || !out) return 0;
+
+    char   toks[24][16];
+    size_t n = mnemonic_split(m->words, toks);
+    if (n == 0 || out_cap < n) return 0;
+
+    size_t found = 0;
+    for (size_t i = 0; i < n; i++) {
+        const size_t idx = bip39_wordlist_index(toks[i]);
+        if (idx >= 2048u) break;
+        out[i] = (uint16_t)idx;
+        found++;
+    }
+    secure_memzero(toks, sizeof(toks));
+    return (found == n) ? n : 0;
+}
+
 mnemonic_t* mnemonic_combine(mnemonic_t* a, mnemonic_t* b) {
     ASSERT_OR_DIE(a && b, "null mnemonic");
     ASSERT_OR_DIE(a != b, "cannot combine a mnemonic with itself");
@@ -198,23 +238,9 @@ size_t mnemonic_last_word_candidates(const char* words, const char** out, size_t
     if (!words || !*words || strlen(words) >= MNEMONIC_MAX_INPUT_LEN || !out) return 0;
 
     // Tokenize the mnemonic (the final word is the one we'll replace)
-    char        toks[24][16];
-    size_t      n = 0;
-    const char* p = words;
-    while (*p) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        if (n >= 24) return 0; // too many words
-        size_t tlen = 0;
-        while (*p && *p != ' ' && tlen + 1 < sizeof(toks[n])) {
-            toks[n][tlen++] = *p++;
-        }
-        toks[n][tlen] = '\0';
-        while (*p && *p != ' ') p++; // skip any overlong token remainder
-
-        n++;
-    }
-    if (n != 12 && n != 24) return 0;
+    char   toks[24][16];
+    size_t n = mnemonic_split(words, toks);
+    if (n == 0) return 0;
 
     // Look up the first n-1 words (ignore the wrong last word)
     size_t idxs[24];

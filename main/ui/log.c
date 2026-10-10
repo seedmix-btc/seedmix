@@ -4,12 +4,14 @@
  */
 
 #include "log.h"
+#include "bitvis.h"
 #include "hal.h"
-#include "mnemonic_view.h"
 #include "ui_internal.h"
 #include "util/error.h"
+#include "util/utils.h"
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 /* -- Action log ring buffer ------------------------------------------- */
 #define LOG_MAX 32
@@ -37,39 +39,63 @@ void ui_log_add(const char* fmt, ...) {
 }
 
 /* -- State screen ----------------------------------------------------- */
-void ui_show_state(ui_cb_t on_back, const char* mnemonic_words) {
+// The grid the entropy is drawn in; static because it has to outlive the screen.
+static bitvis_grid_t state_grid;
+
+void ui_show_state(ui_cb_t on_back, const char* entropy_hex) {
     ASSERT_OR_DIE(on_back, "null on_back");
 
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "State & Log");
 
-    // mnemonic display: numbered grid, or a placeholder if none yet
-    lv_obj_t* mn_area;
-    if (mnemonic_words && mnemonic_words[0]) {
-        mn_area = ui_mnemonic_view_create(s);
-        ui_mnemonic_view_set_words(mn_area, mnemonic_words);
-    } else {
-        mn_area = lv_label_create(s);
-        lv_label_set_text(mn_area, "(no mnemonic yet)");
-        lv_obj_set_style_text_color(mn_area, lv_color_hex(0x888888), 0);
-        lv_obj_set_style_text_font(mn_area, ui_font(18), 0);
-    }
-    lv_obj_align(mn_area, LV_ALIGN_TOP_MID, 0, ui_scale(48));
-    lv_obj_update_layout(mn_area);
+    // Current entropy: the hex, and the same bits drawn as a grid.
+    lv_obj_t* ent_area = lv_obj_create(s);
+    lv_obj_set_size(ent_area, ui_scale(440), LV_SIZE_CONTENT);
+    lv_obj_align(ent_area, LV_ALIGN_TOP_MID, 0, ui_scale(48));
+    // Black, because the bit grid is an opaque RGB565 image with a black
+    // background, so anything lighter would show it as a box.
+    lv_obj_set_style_bg_color(ent_area, lv_color_black(), 0);
+    lv_obj_set_style_border_width(ent_area, 0, 0);
+    lv_obj_set_style_pad_all(ent_area, ui_scale(4), 0);
+    lv_obj_set_style_pad_row(ent_area, ui_scale(4), 0);
+    lv_obj_set_flex_flow(ent_area, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(ent_area, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    // Cap tall grids (24 words) so the log below always has room; allow scroll.
-    bool       mn_scrollable = false;
-    lv_coord_t mn_h          = lv_obj_get_height(mn_area);
-    if (mnemonic_words && mnemonic_words[0] && mn_h > ui_scale(150)) {
-        lv_obj_set_height(mn_area, ui_scale(150));
-        lv_obj_add_flag(mn_area, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scroll_dir(mn_area, LV_DIR_VER);
-        mn_scrollable = true;
+    // 16 or 32 bytes, as hex. Anything else is treated as "no entropy yet".
+    uint8_t entropy[32];
+    size_t  entropy_len = 0;
+    if (entropy_hex && entropy_hex[0]) {
+        const size_t hex_len = strlen(entropy_hex);
+        if ((hex_len == 32 || hex_len == 64) &&
+            hex_to_bytes(entropy_hex, hex_len, entropy, sizeof(entropy))) {
+            entropy_len = hex_len / 2;
+        }
     }
-    if (mn_scrollable && ui_small_screen()) {
-        lv_obj_t* arrows = ui_add_scroll_arrows(s, mn_area, ui_scale(30));
-        lv_obj_align_to(arrows, mn_area, LV_ALIGN_OUT_RIGHT_MID, ui_scale(4), 0);
+
+    if (entropy_len) {
+        lv_obj_t* lbl = lv_label_create(ent_area);
+        lv_label_set_text(lbl, "Current entropy:");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(lbl, ui_font(12), 0);
+
+        lv_obj_t* val = lv_label_create(ent_area);
+        lv_label_set_text(val, entropy_hex);
+        lv_obj_set_style_text_color(val, lv_color_white(), 0);
+        lv_obj_set_style_text_font(val, ui_font(12), 0);
+        lv_obj_set_width(val, ui_scale(424));
+        lv_label_set_long_mode(val, LV_LABEL_LONG_WRAP);
+
+        const uint32_t bits = (uint32_t)entropy_len * 8u;
+        bitvis_grid_create(&state_grid, ent_area, s, bits);
+        bitvis_grid_set(&state_grid, entropy, bits, bits);
+    } else {
+        lv_obj_t* lbl = lv_label_create(ent_area);
+        lv_label_set_text(lbl, "(no entropy yet)");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(lbl, ui_font(18), 0);
     }
+    secure_memzero(entropy, sizeof(entropy));
+    lv_obj_update_layout(ent_area);
 
     // log entries (oldest first, top to bottom)
     lv_obj_t* log_cont = lv_obj_create(s);
@@ -91,8 +117,8 @@ void ui_show_state(ui_cb_t on_back, const char* mnemonic_words) {
         lv_obj_set_width(entry, ui_scale(420));
     }
 
-    // Fit the log between the mnemonic area and the back button.
-    lv_coord_t mn_bottom = lv_obj_get_y(mn_area) + lv_obj_get_height(mn_area);
+    // Fit the log between the entropy area and the back button.
+    lv_coord_t mn_bottom = lv_obj_get_y(ent_area) + lv_obj_get_height(ent_area);
     lv_coord_t log_top   = mn_bottom + ui_scale(8);
     lv_coord_t log_h =
         (LV_VER_RES - ui_scale(10) - ui_scale(44)) - ui_scale(8) - log_top; /* above back button */

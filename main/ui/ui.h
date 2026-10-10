@@ -7,6 +7,7 @@
 #define UI_H
 
 #include "lvgl.h"
+#include "mnemonic_view.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -135,7 +136,15 @@ void ui_coin_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_
 void        ui_show_enter_words(ui_cb_t on_ok);
 const char* ui_get_entered_words(void);
 
-void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export);
+void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export,
+                      ui_cb_t on_help, const mnemonic_bits_t* bits);
+/**
+ * @brief Explain how the words are cut out of the entropy, eleven bits at a time.
+ *
+ * An example and the rule, not the mnemonic's own bits: the word boxes already
+ * show those.
+ */
+void ui_show_words_help(ui_cb_t on_close);
 
 /**
  * @brief Show the entropy merge in progress: the two input entropies, the XOR

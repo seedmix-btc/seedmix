@@ -66,6 +66,15 @@ bool hex_to_bytes(const char* hex, size_t hex_len, uint8_t* out, size_t out_size
 void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t out_len);
 
 /**
+ * @brief Copy @p n bits of @p src, starting at bit @p from, into @p out.
+ *
+ * Bits are numbered from the most significant bit of @p src[0]. The copy is
+ * left-aligned in @p out, which must hold ceil(n / 8) bytes; the spare bits of
+ * its last byte are zeroed.
+ */
+void utils_bit_window(const uint8_t* src, size_t from, unsigned n, uint8_t* out);
+
+/**
  * @brief True if @p wc is a supported mnemonic word count (12 or 24).
  */
 bool utils_word_count_valid(unsigned wc);

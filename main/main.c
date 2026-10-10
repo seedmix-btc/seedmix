@@ -47,6 +47,9 @@ static void on_camera_use(void);
 static void on_camera_cancel(void);
 static void on_camera_help(void);
 static void on_camera_help_close(void);
+static void show_final_screen(void);
+static void on_words_help(void);
+static void on_words_help_close(void);
 static void on_scan_qr(void);
 static void on_scan_file(void);
 static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen);
@@ -118,7 +121,7 @@ static void show_entropy_screen(mnemonic_t* m, mnemonic_type_t type, ui_cb_t on_
 // and return to the source screen
 static void merge_or_reject(mnemonic_t* m, mnemonic_type_t result_type, const char* source_desc) {
     if (current && mnemonic_entropy_size(current) != mnemonic_entropy_size(m)) {
-        ui_log_add("rejected %s: word count mismatch", source_desc);
+        ui_log_add("rejected %s: bit count mismatch", source_desc);
         mnemonic_discard(m);
         ui_show_msg("Word count mismatch - mnemonic discarded");
         ui_delay_ms(1500);
@@ -139,8 +142,8 @@ static void on_generate(void) {
     ui_delay_ms(500);
     mnemonic_t* m = mnemonic_generate(word_count, on_generating_msg);
     char        desc[64];
-    int         res = snprintf(desc, sizeof(desc), "generated %u-word from %s", word_count,
-                       hal_get_random_source());
+    int         res = snprintf(desc, sizeof(desc), "generated %u bits from %s",
+                       utils_word_count_bits(word_count), hal_get_random_source());
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }
@@ -558,7 +561,7 @@ static void on_camera_use(void) {
     secure_memzero(entropy, sizeof(entropy));
 
     char desc[48];
-    res = snprintf(desc, sizeof(desc), "camera image %u-word", word_count);
+    res = snprintf(desc, sizeof(desc), "camera image %u bits", utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }
@@ -658,7 +661,7 @@ static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t
 
     unsigned wc = (mnemonic_entropy_size(m) == 32) ? 24 : 12;
     char     desc[48];
-    int      res = snprintf(desc, sizeof(desc), "scanned %u-word SeedQR", wc);
+    int      res = snprintf(desc, sizeof(desc), "scanned %u-bit SeedQR", utils_word_count_bits(wc));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_ENTERED, desc);
     return true;
@@ -1037,8 +1040,49 @@ static void on_export_seedqr(void) {
 static void on_export_done(void) {
     ui_seedqr_cleanup();
     qr_grid_free(&exported_qr);
-    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_FINAL, on_finish_done,
-                     on_export_seedqr);
+    show_final_screen();
+}
+
+/* -- The bits behind the words ---------------------------------------- */
+/* The final screen, the bits screen and the state screen all show where the
+ * words came from, so the bundle is built once from the live mnemonic. */
+static uint8_t         bits_entropy[32];
+static uint16_t        bits_indices[24];
+static char            bits_hex[2 * 32 + 1];
+static mnemonic_bits_t bits_bundle;
+
+// NULL when there is no mnemonic yet; the buffers stay valid until bits_wipe().
+static const mnemonic_bits_t* current_bits(void) {
+    if (!current) return NULL;
+
+    const size_t elen = mnemonic_to_entropy(current, bits_entropy);
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+    ASSERT_OR_DIE(bytes_to_hex(bits_entropy, elen, bits_hex, sizeof(bits_hex)),
+                  "entropy hex buffer too small");
+    const unsigned count = (unsigned)mnemonic_word_indices(current, bits_indices, 24);
+    ASSERT_OR_DIE(count == 12 || count == 24, "unexpected word count");
+
+    bits_bundle.entropy_hex = bits_hex;
+    bits_bundle.entropy     = bits_entropy;
+    bits_bundle.entropy_len = elen;
+    bits_bundle.indices     = bits_indices;
+    return &bits_bundle;
+}
+
+static void bits_wipe(void) {
+    secure_memzero(bits_entropy, sizeof(bits_entropy));
+    secure_memzero(bits_hex, sizeof(bits_hex));
+    memset(&bits_bundle, 0, sizeof(bits_bundle));
+}
+
+static void on_words_help(void) { ui_show_words_help(on_words_help_close); }
+
+static void on_words_help_close(void) { show_final_screen(); }
+
+static void show_final_screen(void) {
+    ASSERT_OR_DIE(current, "no mnemonic to show");
+    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_FINAL, on_finish_done, on_export_seedqr,
+                     on_words_help, current_bits());
 }
 
 /* -- Dice roll entropy source ---------------------------------------- */
@@ -1066,7 +1110,8 @@ static void on_dice_roll(uint8_t value) {
     dice = NULL;
 
     char desc[48];
-    int res = snprintf(desc, sizeof(desc), "d%u dice %u-word (%u rolls)", sides, word_count, rolls);
+    int  res = snprintf(desc, sizeof(desc), "d%u dice %u bits (%u rolls)", sides,
+                       utils_word_count_bits(word_count), rolls);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }
@@ -1135,7 +1180,8 @@ static void on_coin_flip(uint8_t value) {
     coin = NULL;
 
     char desc[48];
-    int  res = snprintf(desc, sizeof(desc), "coin flips %u-word (%u flips)", word_count, flips);
+    int  res = snprintf(desc, sizeof(desc), "coin flips %u bits (%u flips)",
+                       utils_word_count_bits(word_count), flips);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }
@@ -1221,7 +1267,8 @@ static void on_touch_continue(void) {
     touch = NULL;
 
     char desc[48];
-    int  res = snprintf(desc, sizeof(desc), "touch screen %u-word (%u taps)", word_count, taps);
+    int  res = snprintf(desc, sizeof(desc), "touch screen %u bits (%u taps)",
+                       utils_word_count_bits(word_count), taps);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }
@@ -1275,7 +1322,8 @@ static void on_we_complete(void) {
         ui_show_mnemonic_error(on_we_error_cancel, on_we_error_retry, on_we_error_choose);
         return;
     }
-    int res = snprintf(pending_desc, sizeof(pending_desc), "entered %u-word", word_count);
+    int res = snprintf(pending_desc, sizeof(pending_desc), "entered %u bits",
+                       utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
 
     // Show the completed mnemonic and ask the user to confirm before it is
@@ -1359,8 +1407,8 @@ static void on_we_word_selected(const char* last_word) {
     if (!m) {
         FATAL("chosen last word failed validation");
     }
-    res = snprintf(pending_desc, sizeof(pending_desc), "entered %u-word (chosen last word)",
-                   word_count);
+    res = snprintf(pending_desc, sizeof(pending_desc), "entered %u bits (chosen last word)",
+                   utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
     pending_new = m;
     show_entropy_screen(m, MNEMONIC_TYPE_ENTERED, on_we_ok);
@@ -1391,7 +1439,8 @@ static void on_24(void) {
 
 /* -- State screen ----------------------------------------------------- */
 static void on_show_state(void) {
-    ui_show_state(go_back_source, current ? mnemonic_words(current) : NULL);
+    const mnemonic_bits_t* bits = current_bits();
+    ui_show_state(go_back_source, bits ? bits->entropy_hex : NULL);
 }
 
 static void on_finish_done(void) {
@@ -1402,6 +1451,7 @@ static void on_finish_done(void) {
     secure_memzero(we_entered, sizeof(we_entered));
     mnemonic_discard(current);
     current = NULL;
+    bits_wipe();
     ui_go_main();
 }
 
@@ -1410,8 +1460,7 @@ static void on_finish(void) {
         ui_go_main();
         return;
     }
-    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_FINAL, on_finish_done,
-                     on_export_seedqr);
+    show_final_screen();
     ui_log_add("finished");
 }
 
