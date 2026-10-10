@@ -20,22 +20,22 @@ void tearDown(void) {}
 
 /* -- dice ---------------------------------------------------------------- */
 static void test_dice_begin_invalid_word_count(void) {
-    TEST_ASSERT_FATAL(dice_entropy_begin(11, 6));
-    TEST_ASSERT_FATAL(dice_entropy_begin(0, 6));
+    TEST_ASSERT_FATAL(dice_entropy_begin(11, 4));
+    TEST_ASSERT_FATAL(dice_entropy_begin(0, 4));
 }
 
 static void test_dice_begin_invalid_sides(void) {
     TEST_ASSERT_FATAL(dice_entropy_begin(12, 1));
-    TEST_ASSERT_FATAL(dice_entropy_begin(12, 256));
+    TEST_ASSERT_FATAL(dice_entropy_begin(12, 257));
 }
 
 static void test_dice_roll_above_range(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 6);
-    TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 7));
+    dice_entropy_t* d = dice_entropy_begin(12, 4);
+    TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 5));
 }
 
 static void test_dice_roll_below_range(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 6);
+    dice_entropy_t* d = dice_entropy_begin(12, 4);
     TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 0));
 }
 
@@ -91,14 +91,14 @@ static void test_word_count_bits_invalid(void) { TEST_ASSERT_FATAL(utils_word_co
 
 /* -- overflow / buffer-size / null guards -------------------------------- */
 static void test_dice_accumulator_overflow(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 2); /* cap = 128 rolls */
+    dice_entropy_t* d = dice_entropy_begin(12, 2); /* 1 bit per roll -> 128 rolls */
     for (unsigned i = 0; i < 128; i++) dice_entropy_add_roll(d, (i % 2) + 1);
     TEST_ASSERT_FATAL(dice_entropy_add_roll(d, 1));
 }
 
 static void test_dice_derive_buffer_too_small(void) {
-    dice_entropy_t* d = dice_entropy_begin(12, 6);
-    for (unsigned i = 0; i < 64; i++) dice_entropy_add_roll(d, (i % 6) + 1);
+    dice_entropy_t* d = dice_entropy_begin(12, 4);
+    for (unsigned i = 0; i < 64; i++) dice_entropy_add_roll(d, (i % 4) + 1);
     uint8_t out[8] = {0};
     TEST_ASSERT_FATAL(dice_entropy_derive(d, out, sizeof(out)));
 }

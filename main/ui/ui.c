@@ -8,6 +8,7 @@
 #include "assets/splash_240x135_img.h"
 #include "assets/splash_480x320_img.h"
 #include "bitvis.h"
+#include "dice.h"
 #include "hal.h"
 #include "mnemonic_view.h"
 #include "src/widgets/label/lv_label_private.h"
@@ -678,14 +679,158 @@ void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back) {
     ui_swap_screen(s);
 }
 
-/* -- Dice roll entropy ----------------------------------------------- */
-static lv_obj_t*    dice_status  = NULL;
-static ui_uint_cb_t dice_on_roll = NULL;
-
-static void dice_status_delete_cb(lv_event_t* e) {
-    (void)e;
-    dice_status = NULL; // invalidate the pointer when the label is deleted
+/* -- Entropy collection meter ----------------------------------------- */
+// Widest part of the die, i.e. the most bits one roll can add.  A die is read as
+// a sum of power-of-two parts (see dice.c), so this is floor(log2(sides)).
+static unsigned roll_max_bits(unsigned sides) {
+    unsigned k = 0;
+    while ((2u << k) <= sides) k++;
+    return k;
 }
+
+// Expected bits per roll in thousandths, summed over the faces with the same
+// rule the collector runs.  A power-of-two die gives its full log2(sides);
+// splitting costs the rest (a d6 pays 1.67 where 2.58 is available).
+static unsigned roll_rate_milli(unsigned sides) {
+    unsigned long sum = 0;
+    for (unsigned face = 1; face <= sides; face++) sum += dice_entropy_roll_bits(sides, face);
+    return (unsigned)(sum * 1000ul / sides);
+}
+
+/* The dice/coin screens build the seed bit by bit, so they reuse the byte
+ * blocks of the merge/entropy views (bitvis) and fill them in as rolls land.
+ * The collected bits ARE the entropy. */
+
+typedef struct {
+    lv_obj_t*     counts;
+    bitvis_roll_t roll; // the last roll, drawn like one byte block
+    lv_obj_t*     rate; // "1.67 bits/roll", what the die averages
+    lv_obj_t*     togo; // "~77 rolls left"
+    unsigned      rate_milli;
+    bitvis_grid_t grid;
+} entropy_meter_t;
+
+static entropy_meter_t dice_meter;
+static entropy_meter_t coin_meter;
+
+static void meter_delete_cb(lv_event_t* e) {
+    entropy_meter_t* m = lv_event_get_user_data(e);
+    if (m) m->counts = NULL;
+}
+
+// Panel that hosts the grid: a content-sized area under the title, capped so a
+// tall grid scrolls instead of eating the buttons.
+static lv_obj_t* meter_panel_create(lv_obj_t* parent) {
+    lv_obj_t* panel = lv_obj_create(parent);
+    lv_obj_set_size(panel, ui_scale(440), LV_SIZE_CONTENT);
+    lv_obj_set_style_max_height(panel, ui_scale(104), 0);
+    lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+    lv_obj_set_style_bg_opa(panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_set_style_pad_row(panel, ui_scale(4), 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(panel, LV_DIR_VER);
+    return panel;
+}
+
+// What the die is worth, and what is left to collect: how thorough the die is
+// (every roll is whole bits, none are held back) and how much more it costs.
+static void meter_rate_create(entropy_meter_t* m, lv_obj_t* parent) {
+    lv_obj_t* row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, ui_scale(6), 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    m->rate = lv_label_create(row);
+    lv_label_set_text(m->rate, "");
+    lv_obj_set_style_text_color(m->rate, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(m->rate, ui_font(12), 0);
+    lv_obj_set_flex_grow(m->rate, 1); // pushes the estimate right
+
+    m->togo = lv_label_create(row);
+    lv_label_set_text(m->togo, "");
+    lv_obj_set_style_text_color(m->togo, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(m->togo, ui_font(12), 0);
+}
+
+// Build the counts + last-roll block, the rate row and the bit grid, inside
+// @p parent.  The block gets one cell per bit @p sides can add at most; @p prompt
+// shows until the first input.
+static void meter_create(entropy_meter_t* m, lv_obj_t* parent, lv_obj_t* screen,
+                         uint32_t total_bits, unsigned sides, const char* prompt) {
+    memset(m, 0, sizeof(*m));
+    m->rate_milli = roll_rate_milli(sides);
+
+    lv_obj_t* row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    m->counts = lv_label_create(row);
+    lv_label_set_text(m->counts, prompt);
+    lv_obj_set_style_text_color(m->counts, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(m->counts, ui_font(14), 0);
+
+    // The last roll, as one block of the same grid.
+    bitvis_roll_create(&m->roll, row, screen, roll_max_bits(sides));
+
+    meter_rate_create(m, parent);
+
+    bitvis_grid_create(&m->grid, parent, screen, total_bits);
+    lv_obj_add_event_cb(parent, meter_delete_cb, LV_EVENT_DELETE, m);
+}
+
+// Refresh the counts, the rate row, the last-roll block and the grid (@p coin
+// picks the wording).  Every roll is worth whole bits, so there is nothing in
+// flight: what the die pays now is what the seed has.
+static void meter_set(entropy_meter_t* m, const uint8_t* bytes, unsigned count, uint32_t filled,
+                      uint32_t needed, unsigned last_roll, uint32_t last_bits, bool coin) {
+    if (!m->counts) return;
+
+    char text[64];
+    int  res = snprintf(text, sizeof(text), "%u / %u bits   %u %s", (unsigned)filled,
+                       (unsigned)needed, count, coin ? "flips" : "rolls");
+    if (res > 0 && (size_t)res < sizeof(text)) lv_label_set_text(m->counts, text);
+
+    if (m->rate) {
+        const unsigned hundredths = (m->rate_milli + 5u) / 10u; // 1.67 for a d6
+        char           line[48];
+        int            rb = snprintf(line, sizeof(line), "%u.%02u bits/%s", hundredths / 100u,
+                          hundredths % 100u, coin ? "flip" : "roll");
+        if (rb > 0 && (size_t)rb < sizeof(line)) lv_label_set_text(m->rate, line);
+
+        unsigned long left = 0;
+        if (m->rate_milli > 0 && filled < needed) {
+            left = (unsigned long)(needed - filled) * 1000ul / m->rate_milli;
+        }
+        char est[32];
+        int  rt = snprintf(est, sizeof(est), "~%lu %s left", left, coin ? "flips" : "rolls");
+        if (rt > 0 && (size_t)rt < sizeof(est)) lv_label_set_text(m->togo, est);
+    }
+
+    char face[8];
+    if (coin)
+        snprintf(face, sizeof(face), "%c", last_roll == 1 ? 'H' : 'T');
+    else
+        snprintf(face, sizeof(face), "%u", last_roll);
+
+    // Both show the bits the newest roll produced.
+    bitvis_roll_set(&m->roll, face, bytes, filled, last_bits);
+    bitvis_grid_set(&m->grid, bytes, filled, filled - last_bits);
+}
+
+/* -- Dice roll entropy ----------------------------------------------- */
+static ui_uint_cb_t dice_on_roll = NULL;
 
 static void dice_btn_cb(lv_event_t* e) {
     if (!dice_on_roll) return;
@@ -693,7 +838,8 @@ static void dice_btn_cb(lv_event_t* e) {
     dice_on_roll((uint8_t)v);
 }
 
-void ui_show_dice(unsigned sides, ui_uint_cb_t on_roll, ui_cb_t on_cancel) {
+void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_cb_t on_help,
+                  ui_cb_t on_cancel) {
     ASSERT_OR_DIE(sides >= 2, "sides must be >= 2");
     ASSERT_OR_DIE(on_roll, "null on_roll");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
@@ -703,24 +849,20 @@ void ui_show_dice(unsigned sides, ui_uint_cb_t on_roll, ui_cb_t on_cancel) {
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Dice Rolls");
 
-    dice_status = lv_label_create(s);
-    lv_obj_add_event_cb(dice_status, dice_status_delete_cb, LV_EVENT_DELETE, NULL);
-    lv_label_set_text(dice_status, "Roll the die, tap the result");
-    lv_obj_set_style_text_color(dice_status, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_text_font(dice_status, ui_font(18), 0);
-    lv_obj_set_style_text_align(dice_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(dice_status, LV_ALIGN_TOP_MID, 0, ui_scale(60));
+    lv_obj_t* panel = meter_panel_create(s);
+    meter_create(&dice_meter, panel, s, total_bits, sides, "Roll the die, tap the result");
 
-    // 1..sides face buttons, wrapped into a scrollable grid.
+    // Face buttons, wrapped into a scrollable grid just above the footer.
     lv_obj_t* grid = lv_obj_create(s);
-    lv_obj_set_size(grid, ui_scale(440), ui_scale(180));
-    lv_obj_align(grid, LV_ALIGN_CENTER, 0, ui_scale(20));
+    lv_obj_set_size(grid, ui_scale(440), ui_scale(104));
+    lv_obj_align(grid, LV_ALIGN_BOTTOM_MID, 0, -ui_scale(56));
     lv_obj_set_style_bg_color(grid, lv_color_black(), 0);
     lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0); // so the rows fit the panel exactly
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(grid, ui_scale(8), 0);
-    lv_obj_set_style_pad_column(grid, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(grid, ui_scale(6), 0);
+    lv_obj_set_style_pad_column(grid, ui_scale(6), 0);
     lv_obj_set_scroll_dir(grid, LV_DIR_VER);
 
     for (unsigned v = 1; v <= sides; v++) {
@@ -728,32 +870,29 @@ void ui_show_dice(unsigned sides, ui_uint_cb_t on_roll, ui_cb_t on_cancel) {
         snprintf(face, sizeof(face), "%u", v);
 
         lv_obj_t* b = lv_button_create(grid);
-        lv_obj_set_size(b, ui_scale(64), ui_scale(48));
+        lv_obj_set_size(b, ui_scale(42), ui_scale(28));
         lv_obj_add_event_cb(b, dice_btn_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)v);
 
         lv_obj_t* l = lv_label_create(b);
         lv_label_set_text(l, face);
-        lv_obj_set_style_text_font(l, ui_font(24), 0);
+        lv_obj_set_style_text_font(l, ui_font(20), 0);
         lv_obj_center(l);
     }
 
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_LEFT, 10, -10);
     ui_add_btn(s, "Back", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
 }
 
-void ui_dice_set_status(const char* text) {
-    if (dice_status) lv_label_set_text(dice_status, text);
+void ui_dice_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
+                          uint32_t needed, unsigned last_roll, uint32_t last_bits) {
+    ASSERT_OR_DIE(bytes, "null bytes");
+    meter_set(&dice_meter, bytes, count, filled_bits, needed, last_roll, last_bits, false);
 }
 
 /* -- Coin flip entropy ----------------------------------------------- */
-static lv_obj_t*    coin_status  = NULL;
 static ui_uint_cb_t coin_on_flip = NULL;
-
-static void coin_status_delete_cb(lv_event_t* e) {
-    (void)e;
-    coin_status = NULL; // invalidate the pointer when the label is deleted
-}
 
 static void coin_btn_cb(lv_event_t* e) {
     if (!coin_on_flip) return;
@@ -764,7 +903,7 @@ static void coin_btn_cb(lv_event_t* e) {
     coin_on_flip((txt[0] == 'T') ? 1 : 0); // "Tails" -> 1, "Heads" -> 0
 }
 
-void ui_show_coin(ui_uint_cb_t on_flip, ui_cb_t on_cancel) {
+void ui_show_coin(uint32_t total_bits, ui_uint_cb_t on_flip, ui_cb_t on_help, ui_cb_t on_cancel) {
     ASSERT_OR_DIE(on_flip, "null on_flip");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
 
@@ -773,24 +912,153 @@ void ui_show_coin(ui_uint_cb_t on_flip, ui_cb_t on_cancel) {
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Coin Flips");
 
-    coin_status = lv_label_create(s);
-    lv_obj_add_event_cb(coin_status, coin_status_delete_cb, LV_EVENT_DELETE, NULL);
-    lv_label_set_text(coin_status, "Flip a coin, tap the result");
-    lv_obj_set_style_text_color(coin_status, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_text_font(coin_status, ui_font(18), 0);
-    lv_obj_set_style_text_align(coin_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(coin_status, LV_ALIGN_TOP_MID, 0, ui_scale(60));
+    lv_obj_t* panel = meter_panel_create(s);
+    meter_create(&coin_meter, panel, s, total_bits, 2, "Flip a coin, tap the result"); // a d2
 
-    ui_add_btn_evt(s, "Heads", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, -95, 20);
-    ui_add_btn_evt(s, "Tails", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, 95, 20);
+    ui_add_btn_evt(s, "Heads", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, -95, 40);
+    ui_add_btn_evt(s, "Tails", coin_btn_cb, NULL, UI_BTN_SIZE_WIDE, LV_ALIGN_CENTER, 95, 40);
 
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_LEFT, 10, -10);
     ui_add_btn(s, "Back", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
 }
 
-void ui_coin_set_status(const char* text) {
-    if (coin_status) lv_label_set_text(coin_status, text);
+void ui_coin_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
+                          uint32_t needed, unsigned last_roll, uint32_t last_bits) {
+    ASSERT_OR_DIE(bytes, "null bytes");
+    meter_set(&coin_meter, bytes, count, filled_bits, needed, last_roll, last_bits, true);
+}
+
+/* -- How rolls become bits (help) ------------------------------------- */
+// Handles for the diagrams: bitvis handles must outlive their screen, so they
+// live here and are set once, well before the screen's widgets go away.
+static bitvis_roll_t help_d4;       // a d4 roll and the bits it is worth
+static bitvis_roll_t help_burst[3]; // d6 rolls 3, 6, 5 -> 2, 1 and 1 bits
+static bitvis_grid_t help_seed;     // where those bits land in the seed
+
+// A wrapped paragraph in the help body.
+static void help_text(lv_obj_t* parent, const char* text, uint8_t font_px, uint32_t color) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(color), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(font_px), 0);
+    lv_obj_set_width(lbl, LV_PCT(100));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+}
+
+// Heading + paragraph, the shape every section starts with.
+static void help_section(lv_obj_t* parent, const char* heading, const char* body) {
+    help_text(parent, heading, 14, 0xFFFFFF);
+    help_text(parent, body, 12, 0xBBBBBB);
+}
+
+// A row to keep several diagrams side by side.
+static lv_obj_t* help_row(lv_obj_t* parent) {
+    lv_obj_t* row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, ui_scale(14), 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return row;
+}
+
+void ui_show_roll_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Rolls to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so
+    // leave room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bitvis diagrams are opaque RGB565
+    // buffers with black backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. A power-of-two die: one roll is exactly its bits, every time.
+    help_section(cont, "Power-of-two dice (d2, d4, d8, d16)",
+                 "Each roll is worth a fixed number of bits - 1, 2, 3 or 4 -"
+                 " written most significant bit first. A coin is a d2: heads 0, tails 1.");
+    bitvis_roll_create(&help_d4, cont, s, 2);
+    {
+        // d4 roll 3 -> 3 - 1 = 2 -> 10.
+        const uint8_t example[1] = {0x80};
+        bitvis_roll_set(&help_d4, "3", example, 2, 2);
+    }
+    help_text(cont, "roll 3 of a d4 -> 10. Every roll gives exactly two bits.", 12, 0x888888);
+
+    // 2. The other dice are sums of power-of-two dice, which is what makes every
+    // roll worth a whole number of bits.
+    help_section(cont, "Other dice (d6, d10, d12, d20)",
+                 "These dice are read as a sum of power-of-two dice: a d6 is a d4 plus a coin,"
+                 " a d10 is a d8 plus a coin, a d12 is a d8 plus a d4, a d20 is a d16 plus a"
+                 " d4. A face is worth the bits of the part it falls in, so every roll pays out"
+                 " whole bits at once and none are held back. The parts cost bits - a d6 pays"
+                 " 1.67 a roll where carrying the fraction would pay 2.58 - so it takes more"
+                 " rolls, and only an odd-sided die has a face worth nothing at all.");
+    help_text(cont, "A d6 showing 3, then 6, then 5:", 12, 0xFFFFFF);
+    {
+        // Faces 1..4 are the d4 (2 bits); 5 and 6 are the coin (1 bit).
+        const uint8_t ex[1] = {0xA0}; // 10 1 0
+        lv_obj_t*     row   = help_row(cont);
+
+        bitvis_roll_create(&help_burst[0], row, s, 2);
+        bitvis_roll_set(&help_burst[0], "3", ex, 2, 2); // the d4 part -> 10
+        bitvis_roll_create(&help_burst[1], row, s, 1);
+        bitvis_roll_set(&help_burst[1], "6", ex, 3, 1); // the coin part -> 1
+        bitvis_roll_create(&help_burst[2], row, s, 1);
+        bitvis_roll_set(&help_burst[2], "5", ex, 4, 1); // the coin part -> 0
+    }
+    help_text(cont,
+              "2, then 1, then 1 bit: whole bits every roll. Faces 1 to 4 of a d6 read exactly"
+              " like a d4, and 5 and 6 are the coin.",
+              12, 0x888888);
+
+    // 3. Those bits are the seed.
+    help_section(cont, "Those bits are the seed",
+                 "They fill the grid from the front, most significant bit first. Nothing is"
+                 " hashed and nothing is thrown away: every bit a roll is worth goes in as it"
+                 " lands, so the seed is as strong as the bits it holds.");
+    bitvis_grid_create(&help_seed, cont, s, 8);
+    {
+        // Two rolls so far: face 3 gave 10, face 6 gave 1 -> 101 = 0xA0.
+        const uint8_t example[1] = {0xA0};
+        bitvis_grid_set(&help_seed, example, 3, 1);
+    }
+    help_text(cont,
+              "the one bit from roll 6 (highlighted) joins the two roll 3 gave - the rest is"
+              " still to come",
+              12, 0x888888);
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
 }
 
 // Capture-size control, shared by the camera screens. Only offered where the

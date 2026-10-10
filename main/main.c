@@ -68,6 +68,12 @@ static void on_export_seedqr(void);
 static void on_export_done(void);
 static void on_dice_rolls(void);
 static void on_coin_flips(void);
+static void on_dice_roll(uint8_t value);
+static void on_dice_cancel(void);
+static void on_coin_flip(uint8_t value);
+static void on_coin_cancel(void);
+static void on_dice_help(void);
+static void on_coin_help(void);
 static void on_touch_screen(void);
 static void on_touch_tap(lv_coord_t x, lv_coord_t y);
 static void on_show_state(void);
@@ -1009,12 +1015,9 @@ static void on_dice_roll(uint8_t value) {
     dice_entropy_add_roll(dice, value);
 
     if (!dice_entropy_ready(dice)) {
-        char status[64];
-        int  res = snprintf(status, sizeof(status), "Entropy: %u / %u bits (%u rolls)",
-                           (unsigned)dice_entropy_bits(dice), (unsigned)dice_entropy_needed(dice),
-                           dice_entropy_rolls(dice));
-        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(status), "status string too long");
-        ui_dice_set_status(status);
+        ui_dice_set_progress(dice_entropy_bytes(dice), dice_entropy_rolls(dice),
+                             dice_entropy_bits(dice), dice_entropy_needed(dice),
+                             dice_entropy_last_roll(dice), dice_entropy_last_bits(dice));
         return;
     }
 
@@ -1034,6 +1037,24 @@ static void on_dice_roll(uint8_t value) {
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }
 
+// (Re)build the dice screen from the live session, so returning from the help
+// screen keeps the rolls collected so far.
+static void show_dice_screen(void) {
+    ASSERT_OR_DIE(dice, "no active dice session");
+    unsigned sides = dice_entropy_sides(dice);
+    ui_show_dice(sides, utils_word_count_bits(word_count), on_dice_roll, on_dice_help,
+                 on_dice_cancel);
+    if (dice_entropy_rolls(dice) > 0) {
+        ui_dice_set_progress(dice_entropy_bytes(dice), dice_entropy_rolls(dice),
+                             dice_entropy_bits(dice), dice_entropy_needed(dice),
+                             dice_entropy_last_roll(dice), dice_entropy_last_bits(dice));
+    }
+}
+
+static void on_dice_help_close(void) { show_dice_screen(); }
+
+static void on_dice_help(void) { ui_show_roll_help(on_dice_help_close); }
+
 static void on_dice_cancel(void) {
     if (dice) {
         dice_entropy_discard(dice);
@@ -1046,7 +1067,7 @@ static void on_dice_cancel(void) {
 static void on_dice_sides_chosen(uint8_t sides) {
     ASSERT_OR_DIE(!dice, "dice session already active");
     dice = dice_entropy_begin(word_count, sides);
-    ui_show_dice(sides, on_dice_roll, on_dice_cancel);
+    show_dice_screen();
 }
 
 static void on_dice_sides_cancel(void) {
@@ -1064,12 +1085,9 @@ static void on_coin_flip(uint8_t value) {
     coin_entropy_add_flip(coin, value);
 
     if (!coin_entropy_ready(coin)) {
-        char status[64];
-        int  res = snprintf(status, sizeof(status), "Entropy: %u / %u bits (%u flips)",
-                           (unsigned)coin_entropy_bits(coin), (unsigned)coin_entropy_needed(coin),
-                           coin_entropy_flips(coin));
-        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(status), "status string too long");
-        ui_coin_set_status(status);
+        ui_coin_set_progress(coin_entropy_bytes(coin), coin_entropy_flips(coin),
+                             coin_entropy_bits(coin), coin_entropy_needed(coin),
+                             coin_entropy_last_flip(coin), coin_entropy_last_bits(coin));
         return;
     }
 
@@ -1097,10 +1115,25 @@ static void on_coin_cancel(void) {
                          go_source);
 }
 
+// Same as the dice screen: rebuild from the live session after a help trip.
+static void show_coin_screen(void) {
+    ASSERT_OR_DIE(coin, "no active coin session");
+    ui_show_coin(utils_word_count_bits(word_count), on_coin_flip, on_coin_help, on_coin_cancel);
+    if (coin_entropy_flips(coin) > 0) {
+        ui_coin_set_progress(coin_entropy_bytes(coin), coin_entropy_flips(coin),
+                             coin_entropy_bits(coin), coin_entropy_needed(coin),
+                             coin_entropy_last_flip(coin), coin_entropy_last_bits(coin));
+    }
+}
+
+static void on_coin_help_close(void) { show_coin_screen(); }
+
+static void on_coin_help(void) { ui_show_roll_help(on_coin_help_close); }
+
 static void on_coin_flips(void) {
     ASSERT_OR_DIE(!coin, "coin session already active");
     coin = coin_entropy_begin(word_count);
-    ui_show_coin(on_coin_flip, on_coin_cancel);
+    show_coin_screen();
 }
 
 /* -- Touch screen entropy source -------------------------------------- */

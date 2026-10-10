@@ -56,10 +56,42 @@ void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on
 void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel);
 void ui_touch_screen_set_status(const char* text);
 void ui_show_dice_sides(ui_uint_cb_t on_sides, ui_cb_t on_back);
-void ui_show_dice(unsigned sides, ui_uint_cb_t on_roll, ui_cb_t on_cancel);
-void ui_dice_set_status(const char* text);
-void ui_show_coin(ui_uint_cb_t on_flip, ui_cb_t on_cancel);
-void ui_coin_set_status(const char* text);
+/**
+ * @brief Show the dice collection screen.
+ *
+ * @p total_bits is the target (128 or 256); the bit grid is sized to it and
+ * fills in as rolls arrive.  The screen also shows what a roll of @p sides is
+ * worth on average and how many rolls are roughly left.
+ */
+void ui_show_dice(unsigned sides, uint32_t total_bits, ui_uint_cb_t on_roll, ui_cb_t on_help,
+                  ui_cb_t on_cancel);
+
+/**
+ * @brief Update the dice collection: bit grid, counts and readout.
+ *
+ * @p bytes holds the collected entropy (MSB-first), of which @p filled_bits are
+ * known; @p last_roll / @p last_bits describe the newest roll, whose bits are
+ * highlighted in the grid.  Bits are never held back: what a roll is worth is in
+ * the seed straight away.
+ */
+void ui_dice_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
+                          uint32_t needed, unsigned last_roll, uint32_t last_bits);
+
+/** @brief Coin flavour of ui_show_dice(). */
+void ui_show_coin(uint32_t total_bits, ui_uint_cb_t on_flip, ui_cb_t on_help, ui_cb_t on_cancel);
+
+/**
+ * @brief Show how a roll becomes bits, with diagrams.
+ *
+ * Reached from the dice/coin screens' Help button.  @p on_close returns to the
+ * screen that opened it - the caller re-renders its progress, since this screen
+ * owns the widgets in between.
+ */
+void ui_show_roll_help(ui_cb_t on_close);
+
+/** @brief Coin flavour of ui_dice_set_progress(). */
+void ui_coin_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_bits,
+                          uint32_t needed, unsigned last_roll, uint32_t last_bits);
 
 /** @deprecated Use ui_word_entry_begin from word_entry.h instead. */
 void        ui_show_enter_words(ui_cb_t on_ok);
