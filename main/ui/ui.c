@@ -42,6 +42,30 @@ static lv_coord_t     camera_preview_h      = 200;
 static bool           camera_preview_square = false; // fill the box with the frame's centre square
 static uint16_t*      camera_square_buf     = NULL;  // downscaled square, see camera_square_build()
 static lv_coord_t     camera_square_side    = 0;     // its side in pixels (0 = no buffer)
+static lv_obj_t*      camera_delta_img      = NULL;  // "detail" panel beside the frame
+static lv_image_dsc_t camera_delta_dsc;              // descriptor backing that panel
+static uint16_t*      camera_delta_buf = NULL;       // RGB565 cells, freed with its screen
+static lv_coord_t     camera_delta_w = 0, camera_delta_h = 0; // its pixel size, buffer 1:1
+static unsigned       camera_delta_pct   = 0;                 // share of the cells with detail
+static lv_obj_t*      camera_stats       = NULL;              // frames, bytes and detail line
+static unsigned       camera_stat_frames = 0;                 // what main.c last reported
+static uint64_t       camera_stat_bytes  = 0;
+
+// The feed screen's two panels, in reference pixels: the pair fits side by side
+// under the title with the stats line and the button row below.
+#define CAMERA_PANEL_W 225
+#define CAMERA_PANEL_H 169
+
+// Luma steps between one pixel and the next: under this the frame is flat there
+// (a smooth surface, banding, 8-bit rounding), so the cell stays black. A step of
+// CAMERA_DELTA_RANGE more than that lights a cell fully.
+#define CAMERA_DELTA_MIN 12
+#define CAMERA_DELTA_RANGE 32
+// A cell that counts as detail is at least this bright, so the faintest one
+// still shows against the black of a flat scene.
+#define CAMERA_DELTA_LIT 32
+// Below this many per cent of the cells carrying detail, the stats line says so.
+#define CAMERA_FLAT_PCT 2
 
 // Capture size names, indexed by hal_camera_size_t.
 static const char* const s_camera_size_names[HAL_CAMERA_SIZE_COUNT] = {
@@ -650,6 +674,17 @@ void ui_clickthrough(lv_obj_t* obj) {
     if (obj) lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
 }
 
+// Clears the slot a widget was stored in when it is deleted.
+static void ui_forget_cb(lv_event_t* e) {
+    lv_obj_t** slot = lv_event_get_user_data(e);
+    if (slot && *slot == lv_event_get_target_obj(e)) *slot = NULL;
+}
+
+void ui_forget_on_delete(lv_obj_t* obj, lv_obj_t** slot) {
+    ASSERT_OR_DIE(obj && slot, "ui_forget_on_delete: null argument");
+    lv_obj_add_event_cb(obj, ui_forget_cb, LV_EVENT_DELETE, slot);
+}
+
 static void meter_delete_cb(lv_event_t* e) {
     entropy_meter_t* m = lv_event_get_user_data(e);
     if (m) m->counts = NULL;
@@ -1017,12 +1052,6 @@ static lv_obj_t*     touch_seed_box    = NULL;
 static lv_obj_t*     touch_seed_btn    = NULL;
 static bitvis_grid_t touch_seed_grid;
 
-// Nulls whichever pointer the deleted widget was stored in.
-static void touch_widget_delete_cb(lv_event_t* e) {
-    lv_obj_t** slot = lv_event_get_user_data(e);
-    if (slot) *slot = NULL;
-}
-
 static void touch_area_tap_cb(lv_event_t* e) {
     union {
         ui_tap_cb_t fn;
@@ -1069,7 +1098,7 @@ void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel, ui_cb_t on_help
     // anywhere still counts unless it lands on Help or the hold-to-cancel button.
     lv_obj_t* area = lv_obj_create(s);
     touch_area     = area;
-    lv_obj_add_event_cb(area, touch_widget_delete_cb, LV_EVENT_DELETE, &touch_area);
+    ui_forget_on_delete(area, &touch_area);
     lv_obj_set_size(area, LV_PCT(100), LV_PCT(100));
     lv_obj_align(area, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(area, lv_color_hex(0x0a0a0a), 0);
@@ -1113,8 +1142,7 @@ void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel, ui_cb_t on_help
     lv_obj_add_event_cb(panel, touch_area_tap_cb, LV_EVENT_CLICKED, u.vp);
 
     touch_instruction = lv_label_create(area);
-    lv_obj_add_event_cb(touch_instruction, touch_widget_delete_cb, LV_EVENT_DELETE,
-                        &touch_instruction);
+    ui_forget_on_delete(touch_instruction, &touch_instruction);
     lv_label_set_text(touch_instruction, "the tile you hit becomes 6 bits");
     lv_obj_set_style_text_color(touch_instruction, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_font(touch_instruction, ui_font(12), 0);
@@ -1123,7 +1151,7 @@ void ui_show_touch_screen(ui_tap_cb_t on_tap, ui_cb_t on_cancel, ui_cb_t on_help
     // The finish: the tapped bits stay where they are and the seed they hash to
     // appears below them, so the two can be compared before continuing.
     touch_seed_box = lv_obj_create(area);
-    lv_obj_add_event_cb(touch_seed_box, touch_widget_delete_cb, LV_EVENT_DELETE, &touch_seed_box);
+    ui_forget_on_delete(touch_seed_box, &touch_seed_box);
     ui_clickthrough(touch_seed_box);
     lv_obj_set_size(touch_seed_box, ui_scale(440), LV_SIZE_CONTENT);
     lv_obj_align(touch_seed_box, LV_ALIGN_TOP_MID, 0, ui_scale(162));
@@ -1308,28 +1336,185 @@ static void add_camera_size_btn(lv_obj_t* parent) {
                    LV_ALIGN_TOP_RIGHT, -10, 5);
 }
 
-void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
+// The detail panel's buffer belongs to the screen that made it: this frees the one
+// it was handed and not whatever the static points at by then, because the help
+// screen swaps the feed out and back.
+typedef struct {
+    uint16_t* delta; // RGB565 cells, one per panel pixel
+} camera_delta_bufs_t;
+
+static void camera_delta_ctrl_delete_cb(lv_event_t* e) {
+    camera_delta_bufs_t* b = lv_event_get_user_data(e);
+    if (!b) return;
+    if (camera_delta_buf == b->delta) camera_delta_buf = NULL;
+    free(b->delta);
+    free(b);
+}
+
+// A small grey caption, used to name the two panels.
+static void camera_caption(lv_obj_t* parent, const char* text, lv_align_t align, lv_coord_t x,
+                           lv_coord_t y) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(12), 0);
+    lv_obj_align(lbl, align, ui_scale(x), ui_scale(y));
+}
+
+// Frames seen, bytes collected and how much of the frame carries detail: the
+// numbers behind the detail panel, and the nudge when it stays black.
+static void camera_stats_refresh(void) {
+    if (!camera_stats) return;
+
+    char           seen[24];
+    const uint64_t bytes = camera_stat_bytes;
+    if (bytes >= (1u << 20)) {
+        const unsigned mb     = (unsigned)(bytes >> 20);
+        const unsigned tenths = (unsigned)((bytes >> 10) % 1024u) * 10u / 1024u;
+        snprintf(seen, sizeof(seen), "%u.%u MB", mb, tenths);
+    } else {
+        snprintf(seen, sizeof(seen), "%u KB", (unsigned)(bytes >> 10));
+    }
+
+    char line[64];
+    int  res;
+    if (camera_delta_pct < CAMERA_FLAT_PCT) {
+        res = snprintf(line, sizeof(line), "%u frames - %s - point at a busier scene",
+                       camera_stat_frames, seen);
+    } else {
+        res = snprintf(line, sizeof(line), "%u frames - %s - %u %% detail", camera_stat_frames,
+                       seen, camera_delta_pct);
+    }
+    if (res > 0 && (size_t)res < sizeof(line)) lv_label_set_text(camera_stats, line);
+}
+
+void ui_camera_feed_stats(unsigned frames, uint64_t bytes) {
+    camera_stat_frames = frames;
+    camera_stat_bytes  = bytes;
+    camera_stats_refresh();
+}
+
+// Rec. 601 luma of a packed RGB565 pixel, without a divide in sight.
+static uint8_t camera_luma(uint16_t px) {
+    const uint32_t r5 = (px >> 11) & 0x1Fu;
+    const uint32_t g6 = (px >> 5) & 0x3Fu;
+    const uint32_t b5 = px & 0x1Fu;
+    return (uint8_t)((r5 * 315u + g6 * 304u + b5 * 120u) >> 7);
+}
+
+// The detail panel, cell by cell: how far the luma of one pixel stands out from
+// the pixels beside and below it. That is the contrast in the frame, so a lit,
+// textured scene shows its edges while a flat, dark or covered one stays black.
+static void camera_delta_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
+    if (!camera_delta_img || !camera_delta_buf) return;
+    if (w < 2 || h < 2) return;
+
+    const lv_coord_t dw     = camera_delta_w;
+    const lv_coord_t dh     = camera_delta_h;
+    const uint16_t*  src    = (const uint16_t*)rgb565;
+    const uint32_t   step_x = ((uint32_t)w << 16) / (uint32_t)dw; // 16.16, no divide in the loop
+    const uint32_t   step_y = ((uint32_t)h << 16) / (uint32_t)dh;
+    unsigned         lit    = 0;
+
+    for (lv_coord_t y = 0; y < dh; y++) {
+        const uint32_t  sy  = ((uint32_t)y * step_y) >> 16;
+        const uint16_t* row = src + (size_t)sy * w;
+        uint16_t*       out = camera_delta_buf + (size_t)y * (size_t)dw;
+        // The row under the sample, clamped at the last one, so the bottom edge
+        // compares against itself and stays dark.
+        const uint16_t* below_row = row + ((sy + 1u < h) ? w : 0);
+        for (lv_coord_t x = 0; x < dw; x++) {
+            const uint32_t sx    = ((uint32_t)x * step_x) >> 16;
+            const uint32_t sx1   = (sx + 1u < w) ? (sx + 1u) : sx;
+            const uint8_t  here  = camera_luma(row[sx]);
+            const uint8_t  right = camera_luma(row[sx1]);
+            const uint8_t  under = camera_luma(below_row[sx]);
+            const uint8_t  d_r = (here > right) ? (uint8_t)(here - right) : (uint8_t)(right - here);
+            const uint8_t  d_u = (here > under) ? (uint8_t)(here - under) : (uint8_t)(under - here);
+            const uint8_t  d   = (d_r > d_u) ? d_r : d_u;
+            if (d < CAMERA_DELTA_MIN) {
+                out[x] = 0;
+                continue;
+            }
+            lit++;
+            uint32_t bright = (uint32_t)(d - CAMERA_DELTA_MIN) * 255u / CAMERA_DELTA_RANGE;
+            if (bright > 255u) bright = 255u;
+            if (bright < CAMERA_DELTA_LIT) bright = CAMERA_DELTA_LIT; // faint grain reads grey
+            out[x] = (uint16_t)(((bright & 0xF8u) << 8) | ((bright & 0xFCu) << 3) | (bright >> 3));
+        }
+    }
+
+    const uint32_t cells = (uint32_t)dw * (uint32_t)dh;
+    camera_delta_pct     = (unsigned)((uint64_t)lit * 100u / cells);
+
+    lv_obj_invalidate(camera_delta_img);
+    camera_stats_refresh();
+}
+
+void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel, ui_cb_t on_help) {
     ASSERT_OR_DIE(on_use, "null on_use");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
 
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Camera");
 
-    camera_preview_w      = 300;
-    camera_preview_h      = 200;
+    camera_preview_w      = CAMERA_PANEL_W;
+    camera_preview_h      = CAMERA_PANEL_H;
     camera_preview_square = false; // this screen shows the whole frame
 
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     camera_dsc.header.cf    = LV_COLOR_FORMAT_RGB565;
 
+    camera_caption(s, "live", LV_ALIGN_TOP_LEFT, 12, 51);
+    camera_caption(s, "detail", LV_ALIGN_TOP_RIGHT, -12, 51);
+
     camera_img = lv_image_create(s);
+    ui_forget_on_delete(camera_img, &camera_img);
     lv_obj_set_size(camera_img, ui_scale(camera_preview_w), ui_scale(camera_preview_h));
-    lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
+    lv_obj_align(camera_img, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(68));
+
+    // The panel is drawn at its own pixel size, so nothing is scaled on the way
+    // to the screen; its buffer travels with it and is freed when it goes.
+    camera_delta_w     = ui_scale(CAMERA_PANEL_W);
+    camera_delta_h     = ui_scale(CAMERA_PANEL_H);
+    const size_t cells = (size_t)camera_delta_w * (size_t)camera_delta_h;
+
+    camera_delta_bufs_t* bufs = calloc(1, sizeof(*bufs));
+    ASSERT_OR_DIE(bufs, "out of memory for the detail panel");
+    bufs->delta = calloc(cells * 2u, 1); // black until the first frame lands
+    ASSERT_OR_DIE(bufs->delta, "out of memory for the detail panel");
+    camera_delta_buf = bufs->delta;
+    camera_delta_pct = 0;
+
+    memset(&camera_delta_dsc, 0, sizeof(camera_delta_dsc));
+    camera_delta_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+    camera_delta_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+    camera_delta_dsc.header.w      = (uint16_t)camera_delta_w;
+    camera_delta_dsc.header.h      = (uint16_t)camera_delta_h;
+    camera_delta_dsc.header.stride = (uint16_t)(camera_delta_w * 2);
+    camera_delta_dsc.data_size     = (uint32_t)(cells * 2u);
+    camera_delta_dsc.data          = (const uint8_t*)camera_delta_buf;
+
+    camera_delta_img = lv_image_create(s);
+    ui_forget_on_delete(camera_delta_img, &camera_delta_img);
+    lv_obj_add_event_cb(camera_delta_img, camera_delta_ctrl_delete_cb, LV_EVENT_DELETE, bufs);
+    lv_image_set_src(camera_delta_img, &camera_delta_dsc);
+    lv_obj_set_size(camera_delta_img, camera_delta_w, camera_delta_h); // 1:1
+    lv_obj_align(camera_delta_img, LV_ALIGN_TOP_RIGHT, ui_scale(-10), ui_scale(68));
+
+    camera_stats = lv_label_create(s);
+    ui_forget_on_delete(camera_stats, &camera_stats);
+    lv_label_set_text(camera_stats, "");
+    lv_obj_set_style_text_color(camera_stats, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(camera_stats, ui_font(12), 0);
+    lv_obj_align(camera_stats, LV_ALIGN_TOP_MID, 0, ui_scale(243));
+    camera_stats_refresh();
 
     /* "Use Image" (left) and "Cancel" (right). */
     ui_add_btn(s, "Use Image", on_use, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_LEFT, 10, 5);
     add_camera_size_btn(s);
 
     ui_swap_screen(s);
@@ -1385,6 +1570,9 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
     ASSERT_OR_DIE(rgb565, "null rgb565");
     ASSERT_OR_DIE(w > 0 && h > 0, "invalid camera frame size");
 
+    // The detail panel is filled from the same frame, ahead of the preview work.
+    camera_delta_update(rgb565, w, h);
+
     camera_dsc.header.w      = (uint16_t)w;
     camera_dsc.header.h      = (uint16_t)h;
     camera_dsc.header.stride = (uint16_t)(w * 2);
@@ -1433,6 +1621,90 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
     // stretch alignment
     lv_image_set_src(camera_img, &camera_dsc);
     lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_STRETCH);
+}
+
+/* -- Frames to bits (camera help) -------------------------------------- */
+static bitvis_roll_t cam_help_px;   // one pixel's eight low bits
+static bitvis_grid_t cam_help_seed; // the bits a frame becomes
+
+void ui_show_camera_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Frames to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so
+    // leave room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bit views below are opaque RGB565
+    // buffers with black backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. A frame is a lot of numbers, and the numbers wobble.
+    help_section(cont, "The camera turns light into numbers",
+                 "A frame is a grid of pixels and each pixel is three brightness readings -"
+                 " red, green and blue. Light decides roughly how bright each one is; the last"
+                 " step or two of a reading is noise the sensor cannot predict, and that is"
+                 " what this source is worth. It sits in the low bits of a pixel and in the"
+                 " grain between neighbouring pixels; the detail panel shows where that grain"
+                 " and the scene's edges are strong.");
+    bitvis_roll_create(&cam_help_px, cont, s, 8);
+    {
+        // One pixel's eight low bits, out of a frame.
+        const uint8_t example[1] = {0x6B};
+        bitvis_roll_set(&cam_help_px, "px", example, 8, 8);
+    }
+    help_text(cont, "one pixel's low eight bits - 01101011 here", 12, 0x888888);
+
+    // 2. Every byte of the frame is hashed into the seed.
+    help_section(cont, "The whole frame is hashed into the seed",
+                 "Every byte of the frame goes through SHA-256, which spreads what the frame"
+                 " has evenly over the 128 or 256 bits the words are made of. Hashing adds"
+                 " nothing: a frame of a million bytes with nothing new in it yields nothing"
+                 " new, which is why the detail panel beside the picture is the honest meter"
+                 " for this source.");
+    bitvis_grid_create(&cam_help_seed, cont, s, 128);
+    {
+        // A seed as it looks once a frame has been hashed into it.
+        const uint8_t example[16] = {0x5A, 0x2E, 0xC4, 0x17, 0x88, 0x3B, 0xD2, 0x64,
+                                     0x9F, 0x05, 0x71, 0xAE, 0x40, 0xBB, 0x1D, 0xE3};
+        bitvis_grid_set(&cam_help_seed, example, 128, 128);
+    }
+    help_text(cont, "a 128-bit seed, most significant bit first", 12, 0x888888);
+
+    // 3. What to point it at.
+    help_section(cont, "A flat or dark scene is worth very little",
+                 "A covered lens, a dark room, a blank wall: the detail panel goes black because"
+                 " there is nothing in the frame that stands out from what is next to it. Point"
+                 " the camera at a lit scene with texture in it, let a good few frames pass, and"
+                 " keep your hand out of the shot. The seed is as strong as the noise and the"
+                 " light in the frame, not as interesting as the view.");
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
 }
 
 void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done) {

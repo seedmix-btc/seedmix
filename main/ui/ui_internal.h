@@ -79,6 +79,14 @@ lv_obj_t* ui_add_btn(lv_obj_t* parent, const char* text, ui_cb_t cb, ui_btn_size
  * decoration laid over a screen that collects input has to opt out.
  */
 void ui_clickthrough(lv_obj_t* obj);
+/**
+ * @brief Clear @p *slot when @p obj is deleted.
+ *
+ * A callback that outlives the screen (the camera feed timer, say) must not
+ * reach a freed widget. The slot is only cleared while it still points at
+ * @p obj, so a newer screen that has taken it over is left alone.
+ */
+void ui_forget_on_delete(lv_obj_t* obj, lv_obj_t** slot);
 
 /** Create a button with an LVGL event callback (and optional user_data). */
 lv_obj_t* ui_add_btn_evt(lv_obj_t* parent, const char* text, lv_event_cb_t evt_cb, void* user_data,

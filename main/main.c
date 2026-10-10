@@ -45,6 +45,8 @@ static void on_other_source(void);
 static void on_camera_image(void);
 static void on_camera_use(void);
 static void on_camera_cancel(void);
+static void on_camera_help(void);
+static void on_camera_help_close(void);
 static void on_scan_qr(void);
 static void on_scan_file(void);
 static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen);
@@ -211,7 +213,9 @@ static hal_camera_t*      camera = NULL; /* open streaming session */
 static hal_camera_frame_t camera_frame;  /* latest captured frame (owned) */
 static uint8_t*           camera_rgb565; /* RGB565 preview buffer (owned, reused) */
 static uint32_t           camera_w = 0, camera_h = 0;
-static lv_timer_t*        camera_timer = NULL; /* live feed timer */
+static lv_timer_t*        camera_timer  = NULL; /* live feed timer */
+static unsigned           camera_frames = 0;    /* frames the feed screen has seen */
+static uint64_t           camera_bytes  = 0;    /* their payload bytes */
 
 static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_t* gray);
 
@@ -429,9 +433,15 @@ static void camera_feed_tick(lv_timer_t* t) {
         camera_h = camera_frame.height;
     }
 
+    // Every grabbed frame counts towards the feed screen's numbers, whether or
+    // not it ends up being used.
+    camera_frames++;
+    camera_bytes += camera_frame.size;
+
     const uint32_t t_preview = lv_tick_get();
     const uint8_t* pixels    = camera_frame_pixels();
     ui_camera_feed_update(pixels, camera_w, camera_h);
+    ui_camera_feed_stats(camera_frames, camera_bytes);
 
     const uint32_t t_decode = lv_tick_get();
     if (qr_scan_cb && (++qr_scan_tick % 3u) == 0) {
@@ -485,13 +495,22 @@ static void camera_feed_stop(void) {
     camera_release();
 }
 
+// The help screen replaces the feed's widgets; the feed timer keeps running, so
+// closing the help puts the same session back on screen.
+static void show_camera_screen(void) {
+    ASSERT_OR_DIE(camera, "no camera session");
+    ui_show_camera_feed(on_camera_use, on_camera_cancel, on_camera_help);
+}
+
 static void on_camera_image(void) {
     if (!hal_camera_available()) {
         FATAL("Camera not available.");
     }
-    camera = hal_camera_open();
+    camera_frames = 0; // the numbers on the feed screen start here
+    camera_bytes  = 0;
+    camera        = hal_camera_open();
     ASSERT_OR_DIE(camera, "Failed to open camera.");
-    ui_show_camera_feed(on_camera_use, on_camera_cancel);
+    show_camera_screen();
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
 }
 
@@ -500,6 +519,10 @@ static void on_camera_cancel(void) {
     ui_show_other_source(on_camera_image, on_scan_qr, on_dice_rolls, on_coin_flips, on_touch_screen,
                          go_source);
 }
+
+static void on_camera_help(void) { ui_show_camera_help(on_camera_help_close); }
+
+static void on_camera_help_close(void) { show_camera_screen(); }
 
 static void on_camera_use(void) {
     /* Stop the feed and close the camera; the last grabbed frame stays valid. */
@@ -516,18 +539,26 @@ static void on_camera_use(void) {
         FATAL("No camera image captured yet.");
     }
 
-    /* Derive entropy (16 or 32 bytes) from the raw camera bytes. */
-    size_t  elen = (word_count == 24) ? 32 : 16;
-    uint8_t entropy[32];
+    /* Say what is being taken, the way the other sources say what they are doing,
+     * then take it: the whole frame goes into the hash. */
+    char msg[80];
+    int res = snprintf(msg, sizeof(msg), "Camera Image %ux%u - %u Bytes, hashing as entropy source",
+                       (unsigned)camera_frame.width, (unsigned)camera_frame.height,
+                       (unsigned)camera_frame.size);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(msg), "camera message too long");
+    ui_show_msg(msg);
+    ui_delay_ms(1500);
+
+    const size_t elen = (word_count == 24) ? 32 : 16;
+    uint8_t      entropy[32];
     sha256_expand(camera_frame.data, camera_frame.size, entropy, elen);
+    camera_release();
 
     mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
     secure_memzero(entropy, sizeof(entropy));
 
-    camera_release();
-
     char desc[48];
-    int  res = snprintf(desc, sizeof(desc), "camera image %u-word", word_count);
+    res = snprintf(desc, sizeof(desc), "camera image %u-word", word_count);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
     merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
 }

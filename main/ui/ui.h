@@ -34,8 +34,21 @@ void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter, ui_cb_t on_other_sour
                     ui_cb_t on_state, ui_cb_t on_finish, bool is_additional);
 void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_qr, ui_cb_t on_dice, ui_cb_t on_coins,
                           ui_cb_t on_touch, ui_cb_t on_back);
-void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel);
+/**
+ * @brief Show the live camera feed screen.
+ *
+ * The frame is shown on the left and, on the right, how far each pixel stands out
+ * from the ones beside and below it - the grain and detail the seed is made of -
+ * with the frame count, the bytes seen and the share of the frame carrying that
+ * detail below it.
+ * @p on_help may be NULL, which leaves the Help button out.
+ */
+void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel, ui_cb_t on_help);
 void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h);
+/** @brief Feed the frame count and byte total into the feed screen's stats line. */
+void ui_camera_feed_stats(unsigned frames, uint64_t bytes);
+/** @brief Show how the camera's frames become the seed (help screen). */
+void ui_show_camera_help(ui_cb_t on_close);
 void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done);
 void ui_seedqr_cleanup(void);
 void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file);
