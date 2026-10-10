@@ -85,11 +85,12 @@ static void test_rejects_oversized_frame(void) {
     uint8_t payload[32] = {0};
     size_t  out_len     = 0;
 
-    TEST_ASSERT_FALSE(qr_decode(img, 513, 1, payload, sizeof(payload), &out_len));
+    /* QR_SIDE_MAX is 1024, so any side >= 1025 must be rejected. */
+    TEST_ASSERT_FALSE(qr_decode(img, 1025, 1, payload, sizeof(payload), &out_len));
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
-    TEST_ASSERT_FALSE(qr_decode(img, 1, 513, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_FALSE(qr_decode(img, 1, 1025, payload, sizeof(payload), &out_len));
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
-    TEST_ASSERT_FALSE(qr_decode(img, 513, 513, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_FALSE(qr_decode(img, 1025, 1025, payload, sizeof(payload), &out_len));
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
 }
 
@@ -148,6 +149,18 @@ static void test_encode_guards(void) {
     TEST_ASSERT_FALSE(qr_encode(data, sizeof(data), QR_MODE_BYTE, NULL));
 }
 
+static void test_encode_oversized(void) {
+    /* More than a version-40 byte-mode QR can hold: QRinput_append fails. */
+    uint8_t* data = (uint8_t*)malloc(4000);
+    TEST_ASSERT_NOT_NULL(data);
+    memset(data, 0xAA, 4000);
+
+    qr_grid_t g = {0};
+    TEST_ASSERT_FALSE(qr_encode(data, 4000, QR_MODE_BYTE, &g));
+
+    free(data);
+}
+
 static void test_decode_guards(void) {
     uint8_t img[4]      = {0};
     uint8_t payload[16] = {0};
@@ -192,6 +205,7 @@ int main(void) {
     RUN_TEST(test_rejects_oversized_frame);
     RUN_TEST(test_rejects_empty_payload);
     RUN_TEST(test_encode_guards);
+    RUN_TEST(test_encode_oversized);
     RUN_TEST(test_decode_guards);
     RUN_TEST(test_decode_rejects_small_capacity);
     return UNITY_END();

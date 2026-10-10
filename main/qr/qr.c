@@ -12,8 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define QR_SIDE_MAX 512u
-#define QR_SIZE_MAX (QR_SIDE_MAX * QR_SIDE_MAX)
+#define QR_SIDE_MAX QR_DECODE_SIDE_MAX
+#define QR_SIZE_MAX QR_DECODE_PIXELS_MAX
 
 bool qr_encode(const uint8_t* data, size_t len, qr_mode_t mode, qr_grid_t* out) {
     if (!data || len == 0 || len > INT_MAX || !out) return false;
@@ -78,17 +78,24 @@ bool qr_decode(const uint8_t* gray, uint32_t w, uint32_t h, uint8_t* payload, si
 
     bool ok = false;
     int  n  = quirc_count(q);
-    for (int i = 0; i < n; i++) {
-        struct quirc_code code;
-        struct quirc_data data;
-        quirc_extract(q, i, &code);
-        if (quirc_decode(&code, &data) == QUIRC_SUCCESS && (size_t)data.payload_len > 0 &&
-            (size_t)data.payload_len <= payload_cap) {
-            memcpy(payload, data.payload, data.payload_len);
-            *out_len = data.payload_len;
-            ok       = true;
-            break;
+
+    if (n > 0) {
+        struct quirc_code* code = malloc(sizeof(*code));
+        struct quirc_data* data = malloc(sizeof(*data));
+        if (code && data) {
+            for (int i = 0; i < n; i++) {
+                quirc_extract(q, i, code);
+                if (quirc_decode(code, data) == QUIRC_SUCCESS && (size_t)data->payload_len > 0 &&
+                    (size_t)data->payload_len <= payload_cap) {
+                    memcpy(payload, data->payload, data->payload_len);
+                    *out_len = data->payload_len;
+                    ok       = true;
+                    break;
+                }
+            }
         }
+        free(code);
+        free(data);
     }
 
     quirc_destroy(q);

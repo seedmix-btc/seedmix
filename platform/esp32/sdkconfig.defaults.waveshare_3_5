@@ -1,0 +1,158 @@
+# seedmix board overlay - Waveshare ESP32-S3-Touch-LCD-3.5(-C).
+#
+# Combine with the shared `sdkconfig.defaults` (base first, this file second):
+#
+#     BOARD=waveshare_3_5 ./scripts/build_esp32.sh
+#     # or
+#     SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.waveshare_3_5" \
+#         idf.py set-target esp32s3
+#
+# The first configure also needs network access: it pulls the official
+# esp_lcd_st7796 / esp_lcd_touch* drivers from the ESP Component Registry (see
+# main/idf_component.yml). ESP-IDF ships none of them in-tree.
+#
+# Board: ESP32-S3R8 (16 MB flash, 8 MB octal PSRAM), 3.5" 320x480 IPS panel on
+# an ST7796 SPI controller, FT6336 capacitive touch and a TCA9554 IO expander
+# (panel reset) on I2C, PWM backlight, and the ESP32-S3 native USB for console.
+#
+# Pin map (from the Waveshare schematic / their ESP-IDF demo's driver.h):
+#     LCD   SCLK=5  MOSI=1  CS=none  DC=3   RST=none (TCA9554 EXIO1)  BL=6
+#     Touch I2C SDA=8 SCL=7, addr 0x38, INT/RST not wired
+#     Button BOOT = GPIO 0 (active low)
+#
+# NOTE: the OV5640 camera socket on the -C version is NOT configured here. Its
+# data lines (Y2..Y9 = 45,47,48,46,42,40,39,21) are not consecutive, which the
+# current camera Kconfig (a single D0 base GPIO) cannot express, and no camera
+# driver is implemented yet.
+
+# -- Target / flash / PSRAM --------------------------------------------
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Console on the SoC's native USB-Serial-JTAG: the Type-C connector is wired
+# straight to the ESP32-S3, there is no USB-UART bridge on the board.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# -- LVGL (panel-specific) ---------------------------------------------
+# Bigger panel than the T-Display, so a bigger LVGL heap and more fonts in use.
+CONFIG_LV_MEM_SIZE_KILOBYTES=128
+
+# -- seedmix: display ---------------------------------------------------
+# 480x320 is the panel's native 320x480 rotated 90 degrees (SWAP_XY), which
+# matches the shared UI's 480x320 landscape reference layout exactly.
+CONFIG_SEEDMIX_DISPLAY_RESOLUTION_480_320=y
+CONFIG_SEEDMIX_DISPLAY_DRIVER_ST7796=y
+CONFIG_SEEDMIX_DISPLAY_SPI_HOST=2
+CONFIG_SEEDMIX_DISPLAY_SPI_FREQ_HZ=80000000
+CONFIG_SEEDMIX_DISPLAY_SPI_CLK_GPIO=5
+CONFIG_SEEDMIX_DISPLAY_SPI_MOSI_GPIO=1
+CONFIG_SEEDMIX_DISPLAY_SPI_CS_GPIO=-1
+CONFIG_SEEDMIX_DISPLAY_SPI_DC_GPIO=3
+CONFIG_SEEDMIX_DISPLAY_RST_GPIO=-1
+CONFIG_SEEDMIX_DISPLAY_BACKLIGHT_GPIO=6
+CONFIG_SEEDMIX_DISPLAY_BACKLIGHT_PWM=y
+CONFIG_SEEDMIX_DISPLAY_BACKLIGHT_DUTY_PCT=80
+CONFIG_SEEDMIX_DISPLAY_BACKLIGHT_FREQ_HZ=5000
+CONFIG_SEEDMIX_DISPLAY_OFFSET_X=0
+CONFIG_SEEDMIX_DISPLAY_OFFSET_Y=0
+CONFIG_SEEDMIX_DISPLAY_INVERT_COLORS=y
+CONFIG_SEEDMIX_DISPLAY_SWAP_XY=y
+CONFIG_SEEDMIX_DISPLAY_MIRROR_X=y
+CONFIG_SEEDMIX_DISPLAY_MIRROR_Y=y
+CONFIG_SEEDMIX_DISPLAY_BGR=y
+CONFIG_SEEDMIX_DISPLAY_SWAP_BYTES=y
+
+# -- seedmix: input responsiveness -------------------------------------
+# The touch poll and the LVGL timers can only be dispatched on tick
+# boundaries, so at the default 100 Hz every event can be up to 10 ms late.
+# 1000 Hz makes the main loop's sleeps accurate to 1 ms
+CONFIG_FREERTOS_HZ=1000
+CONFIG_LV_DEF_REFR_PERIOD=16
+
+# -- seedmix: I2C bus ---------------------------------------------------
+CONFIG_SEEDMIX_I2C_ENABLE=y
+CONFIG_SEEDMIX_I2C_PORT=0
+CONFIG_SEEDMIX_I2C_SDA_GPIO=8
+CONFIG_SEEDMIX_I2C_SCL_GPIO=7
+CONFIG_SEEDMIX_I2C_FREQ_HZ=400000
+
+# -- seedmix: IO expander (panel reset) --------------------------------
+CONFIG_SEEDMIX_IO_EXPANDER_ENABLE=y
+CONFIG_SEEDMIX_IO_EXPANDER_I2C_ADDR=0x20
+CONFIG_SEEDMIX_IO_EXPANDER_LCD_RESET_PIN=1
+
+# -- seedmix: touchscreen ----------------------------------------------
+# FT6336 (FT5x06-compatible, 0x38). The rotation flags must match the panel:
+# SWAP_XY + MIRROR_Y for the 90-degree landscape rotation chosen above.
+CONFIG_SEEDMIX_TOUCHSCREEN_ENABLE=y
+CONFIG_SEEDMIX_TOUCHSCREEN_DRIVER_FT5X06=y
+CONFIG_SEEDMIX_TOUCHSCREEN_I2C_ADDR=0x38
+CONFIG_SEEDMIX_TOUCHSCREEN_RST_GPIO=-1
+CONFIG_SEEDMIX_TOUCHSCREEN_IRQ_GPIO=-1
+CONFIG_SEEDMIX_TOUCHSCREEN_SWAP_XY=y
+CONFIG_SEEDMIX_TOUCHSCREEN_INVERT_X=n
+CONFIG_SEEDMIX_TOUCHSCREEN_INVERT_Y=y
+# The FT6336 reports at up to 100 Hz, so read it at 10 ms rather than LVGL's
+# 33 ms default - a tap shorter than the poll interval can be missed entirely.
+CONFIG_SEEDMIX_TOUCHSCREEN_POLL_MS=10
+# esp_lcd_touch_ft5x06 writes G_THGROUP = 70, the value for the larger FT5x06
+# panels; the FT6336 family default is 30, which needs less finger capacitance
+# to trigger. Set to 0 to leave the driver's value alone.
+CONFIG_SEEDMIX_TOUCHSCREEN_THRESHOLD=30
+
+# -- seedmix: camera ----------------------------------------------------
+# OV5640 on the -C variant. Pin map from Waveshare's demo: Y2..Y9 are the
+# data lines D0..D7 and are NOT consecutive, which is why each one has its
+# own GPIO setting. PWDN and RESET are not routed.
+CONFIG_SEEDMIX_CAMERA_ENABLE=y
+CONFIG_SEEDMIX_CAMERA_MODEL_OV5640=y
+CONFIG_SEEDMIX_CAMERA_FRAMESIZE_VGA=y
+CONFIG_SEEDMIX_CAMERA_XCLK_HZ=24000000
+CONFIG_SEEDMIX_CAMERA_PIN_XCLK=38
+CONFIG_SEEDMIX_CAMERA_PIN_PCLK=41
+CONFIG_SEEDMIX_CAMERA_PIN_VSYNC=17
+CONFIG_SEEDMIX_CAMERA_PIN_HREF=18
+# SCCB is NOT configured here: the camera hangs off the same I2C bus as the
+# touch controller and the IO expander (SEEDMIX_I2C_* above), so the driver
+# attaches to that bus instead of owning pins of its own.
+CONFIG_SEEDMIX_CAMERA_PIN_DATA0=45
+CONFIG_SEEDMIX_CAMERA_PIN_DATA1=47
+CONFIG_SEEDMIX_CAMERA_PIN_DATA2=48
+CONFIG_SEEDMIX_CAMERA_PIN_DATA3=46
+CONFIG_SEEDMIX_CAMERA_PIN_DATA4=42
+CONFIG_SEEDMIX_CAMERA_PIN_DATA5=40
+CONFIG_SEEDMIX_CAMERA_PIN_DATA6=39
+CONFIG_SEEDMIX_CAMERA_PIN_DATA7=21
+CONFIG_SEEDMIX_CAMERA_ROTATION_270=y
+CONFIG_SEEDMIX_CAMERA_HMIRROR=y
+
+# -- seedmix: esp32-camera component -----------------------------------
+# The SCCB layer talks to the sensor over the shared I2C bus that
+# i2c_bus_init() already created, so it must use the same (new) i2c_master
+# driver and the same port rather than installing its own.
+CONFIG_SCCB_HARDWARE_I2C_DRIVER_NEW=y
+CONFIG_SCCB_HARDWARE_I2C_PORT0=y
+
+# -- seedmix: physical buttons -----------------------------------------
+# BOOT is on GPIO0; the PWR button hangs off the IO expander (EXIO6) and is
+# active-high, unlike the GPIO buttons. Both readable buttons are used the
+# same way as on the TTGO: one walks backwards, the other forwards, and both
+# together confirm. (The third physical button, RST, is wired to the
+# module's CHIP_PU pin, so software can never see it.)
+CONFIG_SEEDMIX_BUTTONS_ENABLE=y
+CONFIG_SEEDMIX_BUTTONS_COUNT=2
+CONFIG_SEEDMIX_BUTTON_0_GPIO=0
+CONFIG_SEEDMIX_BUTTON_1_GPIO=-1
+CONFIG_SEEDMIX_BUTTON_2_GPIO=-1
+CONFIG_SEEDMIX_BUTTON_3_GPIO=-1
+CONFIG_SEEDMIX_BUTTONS_EXPANDER_PIN=6
+# PWR = previous, BOOT = next
+CONFIG_SEEDMIX_BUTTONS_SWAP_LR=y
+CONFIG_SEEDMIX_BUTTONS_ACTIVE_LOW=y
+CONFIG_SEEDMIX_BUTTONS_DEBOUNCE_MS=30

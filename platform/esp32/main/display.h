@@ -6,6 +6,8 @@
 #ifndef SEEDMIX_ESP32_DISPLAY_H
 #define SEEDMIX_ESP32_DISPLAY_H
 
+#include <stdint.h>
+
 #include "sdkconfig.h"
 
 #ifdef __cplusplus
@@ -28,6 +30,14 @@ extern "C" {
  * lv_init() and lv_tick_set_cb().
  */
 void display_init(void);
+
+/**
+ * @brief Pixels sent to the panel since the previous call, and reset to zero.
+ *
+ * Pairs with the LVGL pass duration to tell a render-bound pass from a
+ * transfer-bound one.
+ */
+uint32_t display_flush_pixels_take(void);
 
 #ifdef __cplusplus
 }

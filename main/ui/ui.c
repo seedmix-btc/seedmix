@@ -32,8 +32,19 @@ static lv_obj_t* prev_screen = NULL; // track for deferred cleanup
 
 static lv_group_t* s_nav_group = NULL; // button navigation group (ESP32 keypad)
 
-static lv_obj_t*      camera_img = NULL;       // live camera feed image widget
-static lv_image_dsc_t camera_dsc;              // descriptor backing the live feed
+static lv_obj_t*      camera_img = NULL;           // live camera feed image widget
+static lv_image_dsc_t camera_dsc;                  // descriptor backing the live feed
+static lv_coord_t     camera_preview_w      = 300; // preview box (reference size) of the live feed
+static lv_coord_t     camera_preview_h      = 200;
+static bool           camera_preview_square = false; // fill the box with the frame's centre square
+static uint16_t*      camera_square_buf     = NULL;  // downscaled square, see camera_square_build()
+static lv_coord_t     camera_square_side    = 0;     // its side in pixels (0 = no buffer)
+
+// Capture size names, indexed by hal_camera_size_t.
+static const char* const s_camera_size_names[HAL_CAMERA_SIZE_COUNT] = {
+    [HAL_CAMERA_SIZE_QVGA] = "QVGA",
+    [HAL_CAMERA_SIZE_VGA]  = "VGA",
+};
 static lv_image_dsc_t seedqr_dsc;              // descriptor backing the SeedQR image
 static uint8_t*       seedqr_buf       = NULL; // RGB565 buffer for the SeedQR image
 static size_t         seedqr_buf_bytes = 0;
@@ -48,12 +59,10 @@ static void wipe_label_texts(lv_obj_t* obj) {
     }
     if (lv_obj_has_class(obj, &lv_label_class)) {
         lv_label_t* label = (lv_label_t*)obj;
-        if (label->text) secure_memzero(label->text, strlen(label->text));
-        if (label->dot_tmp_alloc && label->dot.tmp_ptr) {
-            secure_memzero(label->dot.tmp_ptr, strlen(label->dot.tmp_ptr));
-        } else {
-            secure_memzero(label->dot.tmp, sizeof(label->dot.tmp));
+        if (label->text && !label->static_txt) {
+            secure_memzero(label->text, strlen(label->text));
         }
+        secure_memzero(label->dot, sizeof(label->dot));
     }
 }
 
@@ -243,7 +252,7 @@ static const struct {
 } btn_sizes[] = {
     [UI_BTN_SIZE_SMALL] = {80, 30, 14},  [UI_BTN_SIZE_MED] = {160, 44, 24},
     [UI_BTN_SIZE_LARGE] = {200, 44, 24}, [UI_BTN_SIZE_WIDE] = {180, 44, 24},
-    [UI_BTN_SIZE_HERO] = {240, 56, 28},
+    [UI_BTN_SIZE_HERO] = {360, 56, 28},
 };
 
 static lv_obj_t* add_btn_impl(lv_obj_t* parent, const char* text, ui_btn_size_t size,
@@ -415,14 +424,15 @@ void ui_show_splash(ui_cb_t on_done) {
 }
 
 /* -- Screens ---------------------------------------------------------- */
-void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
+void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
+                  lv_event_cb_t on_test_error) {
     ASSERT_OR_DIE(on_new_wallet, "null on_new_wallet");
     ASSERT_OR_DIE(on_test_error, "null on_test_error");
 
     if (!main_scr) {
         main_scr = ui_make_screen();
 
-        // Build main screen with "New Wallet" button
+        // Build main screen with main action buttons
         lv_obj_t* scr = main_scr;
         lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
 
@@ -432,8 +442,15 @@ void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_test_error) {
         lv_image_set_inner_align(logo, LV_IMAGE_ALIGN_STRETCH);
         lv_obj_align(logo, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(10));
 
-        ui_add_btn_evt(scr, "New Wallet", on_new_wallet, NULL, UI_BTN_SIZE_HERO, LV_ALIGN_CENTER, 0,
-                       0);
+        ui_add_btn_evt(scr, "Create Seed Mnemonic", on_new_wallet, NULL, UI_BTN_SIZE_HERO,
+                       LV_ALIGN_CENTER, 0, -30);
+
+        // Transaction/PSBT inspection is only meaningful with a camera.
+        if (hal_camera_available()) {
+            ASSERT_OR_DIE(on_inspect_tx, "null on_inspect_tx");
+            ui_add_btn_evt(scr, "Scan Transaction/PSBT", on_inspect_tx, NULL, UI_BTN_SIZE_HERO,
+                           LV_ALIGN_CENTER, 0, 30);
+        }
 
         // Test error button
         lv_obj_t* test_btn = ui_add_btn_evt(scr, "test error!", on_test_error, NULL,
@@ -775,6 +792,33 @@ void ui_coin_set_status(const char* text) {
     if (coin_status) lv_label_set_text(coin_status, text);
 }
 
+// Capture-size control, shared by the camera screens. Only offered where the
+// platform can change size, so the button is never a no-op.
+static const char* camera_size_name(void) {
+    const hal_camera_size_t size = hal_camera_size();
+    return (size < HAL_CAMERA_SIZE_COUNT) ? s_camera_size_names[size] : "?";
+}
+
+static void camera_size_btn_cb(lv_event_t* e) {
+    lv_obj_t* target = lv_event_get_target(e);
+
+    const hal_camera_size_t next =
+        (hal_camera_size_t)(((unsigned)hal_camera_size() + 1u) % (unsigned)HAL_CAMERA_SIZE_COUNT);
+    (void)hal_camera_set_size(next);
+
+    // Read the label back from the HAL: a refused switch must not leave the
+    // button claiming a size the camera is not using.
+    lv_obj_t* label = target ? lv_obj_get_child(target, 0) : NULL;
+    if (label) lv_label_set_text(label, camera_size_name());
+}
+
+// Top-right: the scan screen's progress bar already owns the bottom middle.
+static void add_camera_size_btn(lv_obj_t* parent) {
+    if (!hal_camera_size_switchable() || !hal_camera_available()) return;
+    ui_add_btn_evt(parent, camera_size_name(), camera_size_btn_cb, NULL, UI_BTN_SIZE_SMALL,
+                   LV_ALIGN_TOP_RIGHT, -10, 5);
+}
+
 void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
     ASSERT_OR_DIE(on_use, "null on_use");
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
@@ -782,19 +826,69 @@ void ui_show_camera_feed(ui_cb_t on_use, ui_cb_t on_cancel) {
     lv_obj_t* s = ui_make_screen();
     ui_add_title(s, "Camera");
 
+    camera_preview_w      = 300;
+    camera_preview_h      = 200;
+    camera_preview_square = false; // this screen shows the whole frame
+
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     camera_dsc.header.cf    = LV_COLOR_FORMAT_RGB565;
 
     camera_img = lv_image_create(s);
-    lv_obj_set_size(camera_img, ui_scale(300), ui_scale(200));
+    lv_obj_set_size(camera_img, ui_scale(camera_preview_w), ui_scale(camera_preview_h));
     lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
 
     /* "Use Image" (left) and "Cancel" (right). */
     ui_add_btn(s, "Use Image", on_use, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    add_camera_size_btn(s);
 
     ui_swap_screen(s);
+}
+
+// Average four RGB565 pixels channel by channel, so packing loses nothing.
+static uint16_t camera_avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
+    const uint32_t r = ((a >> 11) + (b >> 11) + (c >> 11) + (d >> 11)) >> 2;
+    const uint32_t g =
+        (((a >> 5) & 0x3Fu) + ((b >> 5) & 0x3Fu) + ((c >> 5) & 0x3Fu) + ((d >> 5) & 0x3Fu)) >> 2;
+    const uint32_t bl = ((a & 0x1Fu) + (b & 0x1Fu) + (c & 0x1Fu) + (d & 0x1Fu)) >> 2;
+    return (uint16_t)((r << 11) | (g << 5) | bl);
+}
+
+// Downscale the frame's centre square to `side` pixels by averaging 2x2
+// blocks. Doing it here keeps LVGL out of the scaling: its scaled draw was
+// ~27 ms for this 200x200 box and tore the panel while it ran.
+static bool camera_square_build(const uint8_t* frame, uint32_t w, uint32_t h, lv_coord_t side) {
+    if (side <= 0) return false;
+
+    if (camera_square_side != side) {
+        free(camera_square_buf);
+        camera_square_buf  = malloc((size_t)side * (size_t)side * 2u);
+        camera_square_side = camera_square_buf ? side : 0;
+    }
+    if (!camera_square_buf) return false;
+
+    const uint32_t  src_side = (w < h) ? w : h; // the frame's centred square
+    const uint32_t  x0       = (w - src_side) / 2u;
+    const uint32_t  y0       = (h - src_side) / 2u;
+    const uint16_t* src      = (const uint16_t*)frame;
+
+    // Source step per output pixel in 16.16: Xtensa has no divide instruction.
+    const uint32_t step = ((uint32_t)src_side << 16) / (uint32_t)side;
+
+    for (lv_coord_t y = 0; y < side; y++) {
+        const uint32_t  sy  = y0 + (((uint32_t)y * step) >> 16);
+        const uint16_t* r0  = src + (size_t)sy * w + x0;
+        const uint16_t* r1  = (sy + 1u < y0 + src_side) ? r0 + w : r0;
+        uint16_t*       out = camera_square_buf + (size_t)y * (size_t)side;
+
+        for (lv_coord_t x = 0; x < side; x++) {
+            const uint32_t sx = ((uint32_t)x * step) >> 16;
+            const uint32_t nx = (sx + 1u < src_side) ? sx + 1u : sx;
+            out[x]            = camera_avg4(r0[sx], r0[nx], r1[sx], r1[nx]);
+        }
+    }
+    return true;
 }
 
 void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
@@ -802,9 +896,40 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
     ASSERT_OR_DIE(rgb565, "null rgb565");
     ASSERT_OR_DIE(w > 0 && h > 0, "invalid camera frame size");
 
+    camera_dsc.header.w      = (uint16_t)w;
+    camera_dsc.header.h      = (uint16_t)h;
+    camera_dsc.header.stride = (uint16_t)(w * 2);
+    camera_dsc.data_size     = w * h * 2;
+    camera_dsc.data          = rgb565;
+
+    if (camera_preview_square) {
+        // Scanning: show the largest centred square. Display only - the
+        // decoder still gets every captured pixel.
+        const lv_coord_t side = (camera_preview_h < camera_preview_w) ? ui_scale(camera_preview_h)
+                                                                      : ui_scale(camera_preview_w);
+        if (camera_square_build(rgb565, w, h, side)) {
+            // Widget exactly the image size, so LVGL blits with no transform.
+            camera_dsc.header.w      = (uint16_t)side;
+            camera_dsc.header.h      = (uint16_t)side;
+            camera_dsc.header.stride = (uint16_t)(side * 2);
+            camera_dsc.data_size     = (uint32_t)side * (uint32_t)side * 2u;
+            camera_dsc.data          = (const uint8_t*)camera_square_buf;
+            lv_obj_set_size(camera_img, side, side);
+            lv_image_set_src(camera_img, &camera_dsc);
+            lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_STRETCH);
+            return;
+        }
+
+        // Out of memory: let LVGL scale the frame itself, slower but correct.
+        lv_obj_set_size(camera_img, side, side);
+        lv_image_set_src(camera_img, &camera_dsc);
+        lv_image_set_inner_align(camera_img, LV_IMAGE_ALIGN_COVER);
+        return;
+    }
+
     // Fit the frame into the scaled preview area, preserving aspect ratio
-    uint32_t preview_w = (uint32_t)ui_scale(300);
-    uint32_t preview_h = (uint32_t)ui_scale(200);
+    uint32_t preview_w = (uint32_t)ui_scale(camera_preview_w);
+    uint32_t preview_h = (uint32_t)ui_scale(camera_preview_h);
     uint32_t disp_w = w, disp_h = h;
     if (w > preview_w || h > preview_h) {
         uint32_t zx = (256 * preview_w) / w;
@@ -814,12 +939,6 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h) {
         disp_h      = (h * z) / 256;
     }
     lv_obj_set_size(camera_img, disp_w, disp_h);
-
-    camera_dsc.header.w      = (uint16_t)w;
-    camera_dsc.header.h      = (uint16_t)h;
-    camera_dsc.header.stride = (uint16_t)(w * 2);
-    camera_dsc.data_size     = w * h * 2;
-    camera_dsc.data          = rgb565;
 
     // Set the source first so the image has valid dimensions, then apply the
     // stretch alignment
@@ -895,25 +1014,176 @@ void ui_seedqr_cleanup(void) {
     }
 }
 
-void ui_show_qr_scan(ui_cb_t on_scan, ui_cb_t on_cancel) {
-    ASSERT_OR_DIE(on_scan, "null on_scan");
+static lv_obj_t* qr_scan_bar    = NULL;
+static lv_obj_t* qr_scan_status = NULL;
+
+static void qr_scan_bar_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_bar = NULL;
+}
+
+static void qr_scan_status_delete_cb(lv_event_t* e) {
+    (void)e;
+    qr_scan_status = NULL;
+}
+
+void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file) {
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ASSERT_OR_DIE(title, "null title");
+
+    /* Scanning an image file is only offered where the platform can do it
+     * (desktop and browser builds).  Its button sits next to Cancel, which
+     * costs a button row, so the live preview shrinks to make room. */
+    bool have_file_btn = on_open_file && hal_file_image_available();
 
     lv_obj_t* s = ui_make_screen();
-    ui_add_title(s, "Scan QR");
+    ui_add_title(s, title);
+
+    camera_preview_w      = 300;
+    camera_preview_h      = have_file_btn ? 160 : 200;
+    camera_preview_square = true; // scanning: show the frame's centre square only
 
     memset(&camera_dsc, 0, sizeof(camera_dsc));
     camera_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     camera_dsc.header.cf    = LV_COLOR_FORMAT_RGB565;
 
     camera_img = lv_image_create(s);
-    lv_obj_set_size(camera_img, ui_scale(300), ui_scale(200));
+    lv_obj_set_size(camera_img, ui_scale(camera_preview_w), ui_scale(camera_preview_h));
     lv_obj_align(camera_img, LV_ALIGN_TOP_MID, 0, ui_scale(45));
 
-    ui_add_btn(s, "Scan", on_scan, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    /* Multipart progress: status text above a progress bar. */
+    qr_scan_status = lv_label_create(s);
+    lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+    lv_obj_set_style_text_color(qr_scan_status, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(qr_scan_status, ui_font(14), 0);
+    lv_obj_set_width(qr_scan_status, ui_scale(250));
+    lv_obj_align(qr_scan_status, LV_ALIGN_BOTTOM_LEFT, ui_scale(20),
+                 ui_scale(have_file_btn ? -90 : -50));
+    lv_obj_add_event_cb(qr_scan_status, qr_scan_status_delete_cb, LV_EVENT_DELETE, NULL);
+
+    qr_scan_bar = lv_bar_create(s);
+    lv_obj_set_size(qr_scan_bar, ui_scale(250), ui_scale(12));
+    lv_obj_align(qr_scan_bar, LV_ALIGN_BOTTOM_LEFT, ui_scale(20),
+                 ui_scale(have_file_btn ? -70 : -26));
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(0x222222), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(qr_scan_bar, lv_color_hex(UI_COLOR_SEED_GREEN), LV_PART_INDICATOR);
+    lv_bar_set_range(qr_scan_bar, 0, 100);
+    lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+    lv_obj_add_event_cb(qr_scan_bar, qr_scan_bar_delete_cb, LV_EVENT_DELETE, NULL);
+
+    if (have_file_btn) {
+        ui_add_btn(s, "Open File", on_open_file, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    }
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    add_camera_size_btn(s);
 
     ui_swap_screen(s);
+}
+
+void ui_qr_scan_progress(size_t received, size_t expected) {
+    if (expected == 0) {
+        if (qr_scan_status) lv_label_set_text(qr_scan_status, "Scanning for QR code...");
+        if (qr_scan_bar) {
+            lv_bar_set_range(qr_scan_bar, 0, 100);
+            lv_bar_set_value(qr_scan_bar, 0, LV_ANIM_OFF);
+        }
+        return;
+    }
+
+    char buf[40];
+    int  res = snprintf(buf, sizeof(buf), "Part %u of %u", (unsigned)received, (unsigned)expected);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(buf), "progress string too long");
+    if (qr_scan_status) lv_label_set_text(qr_scan_status, buf);
+    if (qr_scan_bar) {
+        lv_bar_set_range(qr_scan_bar, 0, (int32_t)expected);
+        lv_bar_set_value(qr_scan_bar, (int32_t)received, LV_ANIM_ON);
+    }
+}
+
+/* Shared layout for the "read this before going on" screens: an optional
+ * warning line, a scrollable text body (with arrow buttons on devices without
+ * touch) and a one- or two-button footer. */
+static void ui_show_text_screen(const char* title, const char* body, const char* warning,
+                                const char* ok_label, ui_cb_t on_ok, const char* cancel_label,
+                                ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(body, "null body");
+    ASSERT_OR_DIE(ok_label, "null ok_label");
+    ASSERT_OR_DIE(on_ok, "null on_ok");
+    ASSERT_OR_DIE(!cancel_label || on_cancel, "cancel label without callback");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t body_top = ui_scale(50);
+
+    if (warning && warning[0]) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, warning);
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(12), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(w, ui_scale(440));
+        lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+        lv_obj_align(w, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+        lv_obj_update_layout(w);
+        body_top = ui_scale(50) + lv_obj_get_height(w) + ui_scale(8);
+    }
+
+    lv_coord_t cont_h = LV_VER_RES - body_top - ui_scale(60);
+    if (cont_h < ui_scale(40)) cont_h = ui_scale(40);
+
+    /* On devices without touch the summary is scrolled with the arrow buttons,
+     * so leave room for them at the right of the screen instead of hanging
+     * them off the edge of the body. */
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, cont_h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), body_top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, body_top);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+
+    lv_obj_t* lbl = lv_label_create(cont);
+    lv_label_set_text(lbl, body);
+    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+    lv_obj_set_width(lbl, body_w - ui_scale(16));
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_scroll_to_y(cont, 0, LV_ANIM_OFF); /* always start at the first line */
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), body_top);
+    }
+
+    if (cancel_label) {
+        /* The accepting button is created first so a button-only device starts
+         * with it focused: a stray press must not discard what was scanned. */
+        ui_add_btn(s, ok_label, on_ok, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+        ui_add_btn(s, cancel_label, on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    } else {
+        ui_add_btn(s, ok_label, on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    }
+
+    ui_swap_screen(s);
+}
+
+void ui_show_tx_inspect(const char* title, const char* body, const char* warning, ui_cb_t on_done) {
+    ui_show_text_screen(title, body, warning, "Done", on_done, NULL, NULL);
+}
+
+void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on_continue,
+                                 ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(on_cancel, "null on_cancel");
+    ui_show_text_screen(title, body, NULL, "Continue", on_continue, "Cancel", on_cancel);
 }
 
 void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export) {
@@ -1080,6 +1350,108 @@ void ui_show_msg(const char* msg) {
     lv_obj_align(l, LV_ALIGN_CENTER, 0, 0);
     ui_swap_screen(s);
     lv_refr_now(NULL);
+}
+
+void ui_show_confirm(const char* title, const char* msg, const char* yes_label,
+                     const char* no_label, ui_cb_t on_yes, ui_cb_t on_no) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(msg, "null msg");
+    ASSERT_OR_DIE(yes_label, "null yes_label");
+    ASSERT_OR_DIE(no_label, "null no_label");
+    ASSERT_OR_DIE(on_yes, "null on_yes");
+    ASSERT_OR_DIE(on_no, "null on_no");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_obj_t* l = lv_label_create(s);
+    lv_label_set_text(l, msg);
+    lv_obj_set_style_text_color(l, lv_color_white(), 0);
+    lv_obj_set_style_text_font(l, ui_font(18), 0);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(l, ui_scale(440));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_align(l, LV_ALIGN_CENTER, 0, ui_scale(-30));
+
+    ui_add_btn(s, yes_label, on_yes, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    ui_add_btn(s, no_label, on_no, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+
+    ui_swap_screen(s);
+}
+
+/* -- Choice list ------------------------------------------------------ */
+typedef struct {
+    ui_uint_cb_t cb;
+    uint8_t      index;
+} choice_ctx_t;
+
+static void choice_invoke_cb(lv_event_t* e) {
+    choice_ctx_t* ctx = (choice_ctx_t*)lv_event_get_user_data(e);
+    if (ctx && ctx->cb) ctx->cb(ctx->index);
+}
+
+static void choice_ctx_delete_cb(lv_event_t* e) {
+    choice_ctx_t* ctx = (choice_ctx_t*)lv_obj_get_user_data(lv_event_get_target(e));
+    if (ctx) lv_free(ctx);
+}
+
+void ui_show_choice(const char* title, const char* msg, const char* const* options, size_t count,
+                    ui_uint_cb_t on_choice, ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(options, "null options");
+    ASSERT_OR_DIE(on_choice, "null on_choice");
+    ASSERT_OR_DIE(count > 0 && count <= 255, "invalid option count");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t top = ui_scale(60);
+    if (msg && msg[0]) {
+        lv_obj_t* m = lv_label_create(s);
+        lv_label_set_text(m, msg);
+        lv_obj_set_style_text_color(m, lv_color_white(), 0);
+        lv_obj_set_style_text_font(m, ui_font(14), 0);
+        lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(m, ui_scale(440));
+        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+        lv_obj_align(m, LV_ALIGN_TOP_MID, 0, ui_scale(52));
+        lv_obj_update_layout(m);
+        top = ui_scale(52) + lv_obj_get_height(m) + ui_scale(10);
+    }
+
+    /* The list scrolls, so it is not limited by the screen height. */
+    lv_coord_t avail = LV_VER_RES - top - ui_scale(56);
+    if (avail < ui_scale(44)) avail = ui_scale(44);
+
+    lv_obj_t* list = lv_obj_create(s);
+    lv_obj_set_size(list, ui_scale(440), avail);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, top);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, ui_scale(8), 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+
+    for (size_t i = 0; i < count; i++) {
+        choice_ctx_t* ctx = lv_malloc(sizeof(*ctx));
+        ASSERT_OR_DIE(ctx, "choice ctx alloc");
+        ctx->cb    = on_choice;
+        ctx->index = (uint8_t)i;
+
+        lv_obj_t* b = ui_add_btn(list, options[i], NULL, UI_BTN_SIZE_HERO, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_user_data(b, ctx);
+        lv_obj_add_event_cb(b, choice_invoke_cb, LV_EVENT_CLICKED, ctx);
+        lv_obj_add_event_cb(b, choice_ctx_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+
+    if (on_cancel)
+        ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
 }
 
 static lv_obj_t* mnemonic_error_btn(lv_obj_t* parent, const char* text, ui_cb_t cb,
