@@ -72,6 +72,8 @@ static void on_scan_qr(void);
 static void on_scan_file(void);
 static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen);
 static void on_qr_scan_cancel(void);
+static void on_seedqr_help(void);
+static void on_seedqr_help_close(void);
 static bool qr_scan_deliver(qr_source_t source, const uint8_t* payload, size_t plen);
 static void qr_scan_poll_file(void);
 static void qr_scan_error(const char* msg);
@@ -292,6 +294,7 @@ static uint8_t*        qr_payload_buf   = NULL; /* reusable decode buffer */
 /* The scan screen that is running, so an error message can bring it back. */
 static const char* qr_scan_title  = NULL;
 static ui_cb_t     qr_scan_cancel = NULL;
+static ui_cb_t     qr_scan_help   = NULL;  /* only the SeedQR scan has a help screen */
 static bool        qr_scan_paused = false; /* an error message owns the screen */
 
 static void qr_scan_stop(void) {
@@ -299,6 +302,7 @@ static void qr_scan_stop(void) {
     qr_scan_tick   = 0;
     qr_scan_title  = NULL;
     qr_scan_cancel = NULL;
+    qr_scan_help   = NULL;
     qr_scan_paused = false;
     if (qr_scan_last) {
         free(qr_scan_last);
@@ -636,7 +640,7 @@ static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_
 
 /* Show the scan screen of the running scan. */
 static void qr_scan_screen_show(void) {
-    ui_show_qr_scan_auto(qr_scan_cancel, qr_scan_title, on_scan_file);
+    ui_show_qr_scan_auto(qr_scan_cancel, qr_scan_title, on_scan_file, qr_scan_help);
 
     /* The camera keeps streaming while a message is up, so the new screen
      * starts from the last frame instead of an empty box. */
@@ -679,8 +683,21 @@ static void on_scan_qr(void) {
     qr_scan_cb     = on_seedqr_payload;
     qr_scan_title  = "Scan SeedQR";
     qr_scan_cancel = on_qr_scan_cancel;
+    qr_scan_help   = on_seedqr_help;
     qr_scan_screen_show();
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+// While the help screen is up it owns the widgets the feed timer would draw
+// into, so the timer stays idle until the scan screen comes back.
+static void on_seedqr_help(void) {
+    qr_scan_paused = true;
+    ui_show_seedqr_help(on_seedqr_help_close);
+}
+
+static void on_seedqr_help_close(void) {
+    qr_scan_paused = false;
+    qr_scan_screen_show();
 }
 
 static void on_qr_scan_cancel(void) {
@@ -897,6 +914,7 @@ static void on_scan_descriptor(void) {
     qr_scan_cb     = on_descriptor_payload;
     qr_scan_title  = "Scan Wallet Descriptor";
     qr_scan_cancel = on_descriptor_cancel;
+    qr_scan_help   = NULL;
     desc_decoder_reset();
     qr_scan_screen_show();
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
@@ -1003,6 +1021,7 @@ static void start_tx_scan(void) {
     qr_scan_cb     = on_tx_payload;
     qr_scan_title  = "Scan Transaction/PSBT";
     qr_scan_cancel = on_inspect_tx_cancel;
+    qr_scan_help   = NULL;
     qr_scan_screen_show();
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
 }

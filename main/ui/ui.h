@@ -33,8 +33,8 @@ void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
 void ui_show_word_count(ui_cb_t on_12, ui_cb_t on_24);
 void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter_mnemonic, ui_cb_t on_other_source,
                     ui_cb_t on_state, ui_cb_t on_finish, bool is_additional);
-void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_qr, ui_cb_t on_dice, ui_cb_t on_coins,
-                          ui_cb_t on_touch, ui_cb_t on_back);
+void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_seedqr, ui_cb_t on_dice,
+                          ui_cb_t on_coins, ui_cb_t on_touch, ui_cb_t on_back);
 /**
  * @brief Show the live camera feed screen.
  *
@@ -52,7 +52,14 @@ void ui_camera_feed_stats(unsigned frames, uint64_t bytes);
 void ui_show_camera_help(ui_cb_t on_close);
 void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done);
 void ui_seedqr_cleanup(void);
-void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file);
+void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file,
+                          ui_cb_t on_help);
+
+/**
+ * @brief Explain the two forms a SeedQR takes and how either becomes the seed's
+ *        bits.
+ */
+void ui_show_seedqr_help(ui_cb_t on_close);
 void ui_qr_scan_progress(size_t received, size_t expected);
 void ui_show_tx_inspect(const char* title, const char* body, const char* warning, ui_cb_t on_done);
 

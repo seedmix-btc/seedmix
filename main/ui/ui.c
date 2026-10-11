@@ -530,8 +530,8 @@ void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter_mnemonic, ui_cb_t on_o
     ui_swap_screen(s);
 }
 
-void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_qr, ui_cb_t on_dice, ui_cb_t on_coins,
-                          ui_cb_t on_touch, ui_cb_t on_back) {
+void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_seedqr, ui_cb_t on_dice,
+                          ui_cb_t on_coins, ui_cb_t on_touch, ui_cb_t on_back) {
     ASSERT_OR_DIE(on_dice, "null on_dice");
     ASSERT_OR_DIE(on_coins, "null on_coins");
     ASSERT_OR_DIE(on_back, "null on_back");
@@ -546,11 +546,11 @@ void ui_show_other_source(ui_cb_t on_camera, ui_cb_t on_scan_qr, ui_cb_t on_dice
 
     if (have_camera) {
         ASSERT_OR_DIE(on_camera, "null on_camera");
-        ASSERT_OR_DIE(on_scan_qr, "null on_scan_qr");
+        ASSERT_OR_DIE(on_scan_seedqr, "null on_scan_seedqr");
         texts[n] = "Camera Image";
         cbs[n++] = on_camera;
-        texts[n] = "Scan QR";
-        cbs[n++] = on_scan_qr;
+        texts[n] = "Scan SeedQR";
+        cbs[n++] = on_scan_seedqr;
     }
     texts[n] = "Dice Rolls";
     cbs[n++] = on_dice;
@@ -1708,6 +1708,69 @@ void ui_show_camera_help(ui_cb_t on_close) {
     ui_swap_screen(s);
 }
 
+/* -- SeedQR to bits (help) --------------------------------------------- */
+// Static: the example block has to outlive the screen.
+static bitvis_roll_t seedqr_help_word;
+
+void ui_show_seedqr_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "SeedQR to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so leave
+    // room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bit block below is an opaque RGB565
+    // buffer with a black background, so anything lighter shows it as a box.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. Compact: the code is the seed's own bytes.
+    help_section(cont, "Compact SeedQR: the bytes themselves",
+                 "The seed's own bytes are written into the code - 16 of them for twelve words,"
+                 " 32 for twenty-four - and reading it back gives those bytes");
+
+    // 2. Standard: the code is numbers, four digits a word.
+    help_section(cont, "Standard SeedQR: four digits a word",
+                 "The code is numbers instead: four digits a word, each group the word's number"
+                 " in the BIP39 list of 2048. Leading zeros count, so 0000 is the first word and"
+                 " 0103 word 103. A twelve-word seed is 48 digits and a twenty-four-word seed 96,"
+                 " so a numeric code carries the whole seed the same way.");
+    bitvis_roll_create(&seedqr_help_word, cont, s, 11);
+    {
+        // Four digits -> word 103 -> its eleven bits.
+        const uint8_t example[2] = {0x0C, 0xE0};
+        bitvis_roll_set(&seedqr_help_word, "0103", example, 11, 11);
+    }
+    help_text(cont, "0103 -> word 103 -> 00001100111", 12, 0x888888);
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
+}
+
 void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done) {
     ASSERT_OR_DIE(cells, "null cells");
     ASSERT_OR_DIE(on_done, "null on_done");
@@ -1789,7 +1852,8 @@ static void qr_scan_status_delete_cb(lv_event_t* e) {
     qr_scan_status = NULL;
 }
 
-void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file) {
+void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file,
+                          ui_cb_t on_help) {
     ASSERT_OR_DIE(on_cancel, "null on_cancel");
     ASSERT_OR_DIE(title, "null title");
 
@@ -1837,6 +1901,7 @@ void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_
         ui_add_btn(s, "Open File", on_open_file, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
     }
     ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_LEFT, 10, 5);
     add_camera_size_btn(s);
 
     ui_swap_screen(s);
