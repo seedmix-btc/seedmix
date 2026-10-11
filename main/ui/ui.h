@@ -173,9 +173,17 @@ void ui_show_generate_process(const char* source, uint32_t bits, ui_cb_t on_ok);
  * @brief Show the entropy merge in progress: the two input entropies, the XOR
  *        result and the animated bit view. The mnemonic words are only shown
  *        on the screen that follows Ok (the final stage).
+ *
+ * @p on_help adds a Help button, only when it is not NULL.
  */
 void ui_show_merge_process(const char* current_entropy_hex, const char* new_entropy_hex,
-                           const char* merged_entropy_hex, ui_cb_t on_ok);
+                           const char* merged_entropy_hex, ui_cb_t on_ok, ui_cb_t on_help);
+
+/**
+ * @brief Explain what XOR does to two seeds: bit by bit, why one known source
+ *        takes nothing away, and why the same source twice cancels out.
+ */
+void ui_show_xor_help(ui_cb_t on_close);
 
 /**
  * @brief Show a working seed as raw entropy: the hex value and the animated

@@ -113,6 +113,8 @@ static void go_source(void);
 static void on_finish(void);
 static void on_finish_done(void);
 static void show_merge_screen(const uint8_t* new_entropy, size_t elen, const char* source_desc);
+static void on_xor_help(void);
+static void on_xor_help_close(void);
 static void on_we_ok(void);
 static void on_we_error_cancel(void);
 static void on_we_error_retry(void);
@@ -224,6 +226,15 @@ static void on_merge_done(void) {
     go_source();
 }
 
+// What XOR does to the two seeds, from the screen that shows it happening. The
+// pending side is kept, so coming back shows the same merge again.
+static void on_xor_help(void) { ui_show_xor_help(on_xor_help_close); }
+
+static void on_xor_help_close(void) {
+    ASSERT_OR_DIE(pending_entropy_len, "no pending entropy");
+    show_merge_screen(pending_entropy, pending_entropy_len, pending_desc);
+}
+
 static void show_merge_screen(const uint8_t* new_entropy, size_t elen, const char* source_desc) {
     ASSERT_OR_DIE(new_entropy, "null merge entropy");
     ASSERT_OR_DIE(elen == current_entropy_len, "merge size mismatch");
@@ -245,7 +256,7 @@ static void show_merge_screen(const uint8_t* new_entropy, size_t elen, const cha
     snprintf(pending_desc, sizeof(pending_desc), "%s", source_desc);
 
     // The result is only acted on when the Ok button is pressed.
-    ui_show_merge_process(ca_hex, na_hex, ma_hex, on_merge_done);
+    ui_show_merge_process(ca_hex, na_hex, ma_hex, on_merge_done, on_xor_help);
 
     // Wipe the hex renderings after use
     secure_memzero(ca_hex, sizeof(ca_hex));

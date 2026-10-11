@@ -947,6 +947,30 @@ static lv_obj_t* help_row(lv_obj_t* parent) {
     return row;
 }
 
+// A diagram's name, and a holder to put the diagram next to it: the bit view's
+// own label can only draw its 3x5 hex glyphs, so anything with words in it is a
+// label like this one.
+static void help_label(lv_obj_t* parent, const char* text) {
+    lv_obj_t* lbl = lv_label_create(parent);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl, ui_font(12), 0);
+}
+
+static lv_obj_t* help_pair(lv_obj_t* parent, const char* name) {
+    lv_obj_t* pair = lv_obj_create(parent);
+    ui_clickthrough(pair);
+    lv_obj_set_size(pair, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(pair, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(pair, 0, 0);
+    lv_obj_set_style_pad_all(pair, 0, 0);
+    lv_obj_set_style_pad_column(pair, ui_scale(6), 0);
+    lv_obj_set_flex_flow(pair, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(pair, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    help_label(pair, name);
+    return pair;
+}
+
 void ui_show_roll_help(ui_cb_t on_close) {
     ASSERT_OR_DIE(on_close, "null on_close");
 
@@ -1675,9 +1699,9 @@ void ui_show_camera_help(ui_cb_t on_close) {
     {
         // One pixel's eight low bits, out of a frame.
         const uint8_t example[1] = {0x6B};
-        bitvis_roll_set(&cam_help_px, "px", example, 8, 8);
+        bitvis_roll_set(&cam_help_px, "6B", example, 8, 8);
     }
-    help_text(cont, "one pixel's low eight bits - 01101011 here", 12, 0x888888);
+    help_text(cont, "6B is one pixel's low eight bits - 01101011 here", 12, 0x888888);
 
     // 2. Every byte of the frame is hashed into the seed.
     help_section(cont, "The whole frame is hashed into the seed",
@@ -2271,9 +2295,9 @@ void ui_show_generate_process(const char* source, uint32_t bits, ui_cb_t on_ok) 
     {
         // The first byte of a seed, read most significant bit first.
         const uint8_t example[1] = {0xB4};
-        bitvis_roll_set(&help_byte, "byte", example, 8, 8);
+        bitvis_roll_set(&help_byte, "B4", example, 8, 8);
     }
-    help_text(cont, "10110100 - the front of the seed", 12, 0x888888);
+    help_text(cont, "B4 is 10110100 - the front of the seed", 12, 0x888888);
 
     ui_add_btn(s, "Continue", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_MID, 0, -10);
 
@@ -2351,7 +2375,7 @@ void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, const char* 
 }
 
 void ui_show_merge_process(const char* current_entropy_hex, const char* new_entropy_hex,
-                           const char* merged_entropy_hex, ui_cb_t on_ok) {
+                           const char* merged_entropy_hex, ui_cb_t on_ok, ui_cb_t on_help) {
     ASSERT_OR_DIE(on_ok, "null on_ok");
 
     lv_obj_t* s = ui_make_screen();
@@ -2403,6 +2427,90 @@ void ui_show_merge_process(const char* current_entropy_hex, const char* new_entr
     }
 
     ui_add_btn(s, "Ok", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_MID, 0, -10);
+    if (on_help) ui_add_btn(s, "Help", on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+
+    ui_swap_screen(s);
+}
+
+/* -- Merging bits (help) ----------------------------------------------- */
+// Statics: the example blocks have to outlive the screen.
+static bitvis_roll_t xor_help_a;
+static bitvis_roll_t xor_help_b;
+static bitvis_roll_t xor_help_r;
+
+void ui_show_xor_help(ui_cb_t on_close) {
+    ASSERT_OR_DIE(on_close, "null on_close");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Merging Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so leave
+    // room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bit blocks below are opaque RGB565
+    // buffers with black backgrounds, so anything lighter shows them as boxes.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    // 1. Bit by bit, one pair at a time.
+    help_section(
+        cont, "Each bit is paired with the one opposite it",
+        "The two are lined up bit by bit and each pair is combined on its own: 0 with 0"
+        " gives 0, 1 with 1 gives 0, and a 0 with a 1 gives 1. Every bit of the result depends on"
+        " exactly two bits, one from each side.");
+    {
+        lv_obj_t* row = help_row(cont);
+
+        const uint8_t a[1] = {0xCA}; // 11001010
+        const uint8_t b[1] = {0x66}; // 01100110
+        const uint8_t r[1] = {0xAC}; // 10101100
+
+        // Named from beside the block, so the name can be any text: the block's
+        // own label only has the small hex glyphs.
+        bitvis_roll_create(&xor_help_a, help_pair(row, "a:"), s, 8);
+        bitvis_roll_set(&xor_help_a, "", a, 8, 8);
+        bitvis_roll_create(&xor_help_b, help_pair(row, "b:"), s, 8);
+        bitvis_roll_set(&xor_help_b, "", b, 8, 8);
+        bitvis_roll_create(&xor_help_r, help_pair(row, "a ^ b:"), s, 8);
+        bitvis_roll_set(&xor_help_r, "", r, 8, 8);
+    }
+    help_text(cont, "11001010, 01100110, 10101100", 12, 0x888888);
+
+    // 2. Why merging is worth doing.
+    help_section(
+        cont, "A source that is known takes nothing away",
+        "If one side is known to someone else - a public mnemonic phrase, a"
+        " die rolled in public - the result is still as unpredictable as the"
+        " other side. One good private random source is enough, and a weak one cannot spoil it.");
+
+    // 3. The one thing merging cannot fix.
+    help_section(cont, "The same source twice cancels out",
+                 "XOR undoes itself. Two sources that produced the same bytes leave nothing"
+                 " behind, and a source added to one that already holds it takes it back out"
+                 " again. Two sources with the same output are one source, not two.");
+
+    ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
 }

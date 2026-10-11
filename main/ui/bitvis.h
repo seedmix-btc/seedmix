@@ -98,6 +98,10 @@ void bitvis_roll_create(bitvis_roll_t* r, lv_obj_t* parent, lv_obj_t* screen, un
  * @p bytes holds the stream MSB-first with @p filled_bits of them known; the
  * last @p nbits of those are shown (a roll's contribution, which is what the
  * grid highlights).  @p nbits == 0 leaves every cell unknown.
+ *
+ * The label is drawn with the bit view's own 3x5 glyphs, which cover hex digits
+ * and the letters H, T and - only: anything else is skipped, so label a block
+ * with the byte value it holds ("6B") and put words in a help_text() caption.
  */
 void bitvis_roll_set(bitvis_roll_t* r, const char* label, const uint8_t* bytes,
                      uint32_t filled_bits, uint32_t nbits);
