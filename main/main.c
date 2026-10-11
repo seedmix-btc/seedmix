@@ -200,6 +200,8 @@ static char                we_entered[MNEMONIC_MAX_INPUT_LEN];
 
 static void on_enter_manual(void);
 static void on_we_complete(void);
+static void on_we_help(void);
+static void on_we_help_close(void);
 
 static void pending_wipe(void) {
     secure_memzero(pending_entropy, sizeof(pending_entropy));
@@ -259,7 +261,7 @@ static void on_we_cancel(void) {
 }
 
 static void on_enter_manual(void) {
-    we_handle = ui_word_entry_begin(word_count, on_we_complete, on_we_cancel);
+    we_handle = ui_word_entry_begin(word_count, on_we_complete, on_we_cancel, on_we_help);
 }
 
 static void on_other_source(void) {
@@ -1380,6 +1382,14 @@ static void on_touch_screen(void) {
     show_touch_screen();
 }
 
+// The entry screen asks for words to be typed, so what it explains is the words
+// read as bits, and coming back from it has to leave the typing where it was.
+static void on_we_help(void) { ui_show_words_to_bits_help(on_we_help_close); }
+
+static void on_we_help_close(void) {
+    if (we_handle) ui_word_entry_reshow(we_handle);
+}
+
 static void on_we_complete(void) {
     const char* txt = ui_word_entry_result(we_handle);
     char        buf[MNEMONIC_MAX_INPUT_LEN];
@@ -1462,8 +1472,8 @@ static void on_we_error_retry(void) {
         on_enter_manual(); // nothing entered yet; start from scratch
         return;
     }
-    we_handle =
-        ui_word_entry_resume(word_count, word_count - 1, prefix, on_we_complete, on_we_cancel);
+    we_handle = ui_word_entry_resume(word_count, word_count - 1, prefix, on_we_complete,
+                                     on_we_cancel, on_we_help);
 }
 
 static void on_we_error_back(void) {

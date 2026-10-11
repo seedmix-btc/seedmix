@@ -2124,11 +2124,14 @@ static bitvis_roll_t help_word;
 static bitvis_roll_t help_last12;
 static bitvis_roll_t help_last24;
 
-void ui_show_words_help(ui_cb_t on_close) {
+// The words and their bits, explained once for both screens that need it: the
+// words screen reads it as words from bits, the entry screen as words to bits.
+static void words_bits_help_show(const char* title, ui_cb_t on_close) {
+    ASSERT_OR_DIE(title, "null title");
     ASSERT_OR_DIE(on_close, "null on_close");
 
     lv_obj_t* s = ui_make_screen();
-    ui_add_title(s, "Words from Bits");
+    ui_add_title(s, title);
 
     lv_coord_t top = ui_scale(50);
     lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
@@ -2201,6 +2204,12 @@ void ui_show_words_help(ui_cb_t on_close) {
     ui_add_btn(s, "Close", on_close, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
 
     ui_swap_screen(s);
+}
+
+void ui_show_words_help(ui_cb_t on_close) { words_bits_help_show("Words from Bits", on_close); }
+
+void ui_show_words_to_bits_help(ui_cb_t on_close) {
+    words_bits_help_show("Words to Bits", on_close);
 }
 
 /* -- Generating entropy (the page before it is drawn) ------------------- */

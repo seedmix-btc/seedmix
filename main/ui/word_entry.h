@@ -16,8 +16,9 @@ extern "C" {
 /** Opaque handle returned by ui_word_entry_begin. */
 typedef void* word_entry_handle_t;
 
-/** Begin guided multi-word entry. `on_done` called when all words entered, `on_cancel` when back pressed on first word. */
-word_entry_handle_t ui_word_entry_begin(unsigned total_words, ui_cb_t on_done, ui_cb_t on_cancel);
+/** Begin guided multi-word entry. `on_done` called when all words entered, `on_cancel` when back pressed on first word, `on_help` when the help button is pressed (NULL hides it). */
+word_entry_handle_t ui_word_entry_begin(unsigned total_words, ui_cb_t on_done, ui_cb_t on_cancel,
+                                        ui_cb_t on_help);
 
 /**
  * Resume entry with `words_done` words already entered (stored in
@@ -26,7 +27,7 @@ word_entry_handle_t ui_word_entry_begin(unsigned total_words, ui_cb_t on_done, u
  */
 word_entry_handle_t ui_word_entry_resume(unsigned total_words, unsigned words_done,
                                          const char* result_so_far, ui_cb_t on_done,
-                                         ui_cb_t on_cancel);
+                                         ui_cb_t on_cancel, ui_cb_t on_help);
 
 /**
  * Like ui_word_entry_resume, but restrict autocomplete to `filter_words`
@@ -36,7 +37,13 @@ word_entry_handle_t ui_word_entry_resume_filtered(unsigned total_words, unsigned
                                                   const char*        result_so_far,
                                                   const char* const* filter_words,
                                                   size_t filter_count, ui_cb_t on_done,
-                                                  ui_cb_t on_cancel);
+                                                  ui_cb_t on_cancel, ui_cb_t on_help);
+
+/**
+ * Put the entry screen back as it was left, for returning to it from a screen
+ * that was shown over it (the help). Everything typed is still there.
+ */
+void ui_word_entry_reshow(word_entry_handle_t handle);
 
 /** Advance to next word. Returns true if all words entered. */
 bool ui_word_entry_next(word_entry_handle_t handle);

@@ -26,6 +26,7 @@ typedef struct {
     lv_obj_t* entry_screen; // word entry screen (for returning from confirm)
     ui_cb_t   on_done;
     ui_cb_t   on_cancel;
+    ui_cb_t   on_help;
     char      selected[32];
 
     /* Optional restricted word set for autocomplete (NULL = full BIP39 list). */
@@ -187,7 +188,8 @@ static void we_cancel_confirm(lv_event_t* e) {
 /* -- Public API ------------------------------------------------------- */
 static word_entry_handle_t we_begin(unsigned total_words, unsigned words_done,
                                     const char* result_so_far, const char* const* filter_words,
-                                    size_t filter_count, ui_cb_t on_done, ui_cb_t on_cancel) {
+                                    size_t filter_count, ui_cb_t on_done, ui_cb_t on_cancel,
+                                    ui_cb_t on_help) {
     ASSERT_OR_DIE(total_words > 0 && total_words <= 24, "total_words must be between 1 and 24");
     ASSERT_OR_DIE(words_done < total_words, "words_done must be less than total_words");
     ASSERT_OR_DIE(result_so_far, "result_so_far is required");
@@ -203,6 +205,7 @@ static word_entry_handle_t we_begin(unsigned total_words, unsigned words_done,
     c->filter_count = filter_count;
     c->on_done      = on_done;
     c->on_cancel    = on_cancel;
+    c->on_help      = on_help;
     strncpy(c->result, result_so_far, sizeof(c->result) - 1);
     c->result[sizeof(c->result) - 1] = '\0';
 
@@ -310,6 +313,7 @@ static word_entry_handle_t we_begin(unsigned total_words, unsigned words_done,
     }
 
     ui_add_btn_evt(s, "Back", we_go_back, c, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_RIGHT, -10, 5);
+    if (c->on_help) ui_add_btn(s, "Help", c->on_help, UI_BTN_SIZE_SMALL, LV_ALIGN_TOP_LEFT, 10, 5);
 
     we_refresh_matches(c);
 
@@ -318,23 +322,34 @@ static word_entry_handle_t we_begin(unsigned total_words, unsigned words_done,
     return c;
 }
 
-word_entry_handle_t ui_word_entry_begin(unsigned total_words, ui_cb_t on_done, ui_cb_t on_cancel) {
-    return we_begin(total_words, 0, "", NULL, 0, on_done, on_cancel);
+word_entry_handle_t ui_word_entry_begin(unsigned total_words, ui_cb_t on_done, ui_cb_t on_cancel,
+                                        ui_cb_t on_help) {
+    return we_begin(total_words, 0, "", NULL, 0, on_done, on_cancel, on_help);
 }
 
 word_entry_handle_t ui_word_entry_resume(unsigned total_words, unsigned words_done,
                                          const char* result_so_far, ui_cb_t on_done,
-                                         ui_cb_t on_cancel) {
-    return we_begin(total_words, words_done, result_so_far, NULL, 0, on_done, on_cancel);
+                                         ui_cb_t on_cancel, ui_cb_t on_help) {
+    return we_begin(total_words, words_done, result_so_far, NULL, 0, on_done, on_cancel, on_help);
 }
 
 word_entry_handle_t ui_word_entry_resume_filtered(unsigned total_words, unsigned words_done,
                                                   const char*        result_so_far,
                                                   const char* const* filter_words,
                                                   size_t filter_count, ui_cb_t on_done,
-                                                  ui_cb_t on_cancel) {
+                                                  ui_cb_t on_cancel, ui_cb_t on_help) {
     return we_begin(total_words, words_done, result_so_far, filter_words, filter_count, on_done,
-                    on_cancel);
+                    on_cancel, on_help);
+}
+
+void ui_word_entry_reshow(word_entry_handle_t handle) {
+    we_ctx_t* c = (we_ctx_t*)handle;
+    ASSERT_OR_DIE(c, "null context");
+    if (!c->entry_screen) return;
+
+    // The screen and everything typed on it were only ever hidden, so this puts
+    // the entry back exactly as it was left.
+    ui_swap_screen(c->entry_screen);
 }
 
 bool ui_word_entry_next(word_entry_handle_t handle) {

@@ -154,6 +154,12 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
 void ui_show_words_help(ui_cb_t on_close);
 
 /**
+ * @brief The same words-and-bits explanation, titled for the other direction:
+ *        reading the words as bits, as the screen that asks for them needs it.
+ */
+void ui_show_words_to_bits_help(ui_cb_t on_close);
+
+/**
  * @brief Explain the step before a generated seed exists: which source the bits
  *        are read from and that those bits make up the seed.
  *
