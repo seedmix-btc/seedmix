@@ -2138,7 +2138,76 @@ void ui_show_words_help(ui_cb_t on_close) {
     ui_swap_screen(s);
 }
 
-void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, ui_cb_t on_ok) {
+/* -- Generating entropy (the page before it is drawn) ------------------- */
+// Static: the example block has to outlive the screen.
+static bitvis_roll_t help_byte;
+
+void ui_show_generate_process(const char* source, uint32_t bits, ui_cb_t on_ok) {
+    ASSERT_OR_DIE(source, "null source");
+    ASSERT_OR_DIE(on_ok, "null on_ok");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Randomness to Bits");
+
+    lv_coord_t top = ui_scale(50);
+    lv_coord_t h   = LV_VER_RES - top - ui_scale(52);
+    // On devices without touch the body is scrolled with arrow buttons, so leave
+    // room for them at the right.
+    bool       use_arrows = !hal_touch_available();
+    lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, body_w, h);
+    if (use_arrows)
+        lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), top);
+    else
+        lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    // Black, not the usual 0x111111: the bit block below is an opaque RGB565
+    // buffer with a black background, so anything lighter shows it as a box.
+    lv_obj_set_style_bg_color(cont, lv_color_black(), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(8), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(6), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    if (use_arrows) {
+        lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+        lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), top);
+    }
+
+    char buf[256];
+    int  res;
+
+    // 1. Where the bits come from.
+    res = snprintf(buf, sizeof(buf), "%u random bits are read from %s.", (unsigned)bits, source);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(buf), "process text too long");
+    help_section(cont, "Random bits are read from the source", buf);
+
+    // 2. What they are.
+    res = snprintf(buf, sizeof(buf),
+                   "These %u bits make up the seed, read from the front, most significant bit"
+                   " first.",
+                   (unsigned)bits);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(buf), "process text too long");
+    help_section(cont, "These bits make up the seed", buf);
+    bitvis_roll_create(&help_byte, cont, s, 8);
+    {
+        // The first byte of a seed, read most significant bit first.
+        const uint8_t example[1] = {0xB4};
+        bitvis_roll_set(&help_byte, "byte", example, 8, 8);
+    }
+    help_text(cont, "10110100 - the front of the seed", 12, 0x888888);
+
+    ui_add_btn(s, "Continue", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+    ui_swap_screen(s);
+}
+
+void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, const char* source,
+                     ui_cb_t on_ok) {
     ASSERT_OR_DIE(entropy_hex, "null entropy");
     ASSERT_OR_DIE(on_ok, "null on_ok");
 
@@ -2169,6 +2238,18 @@ void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, ui_cb_t on_o
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+
+    // Where the bytes came from, so the source is on the screen that shows them
+    // rather than only in the message that flashed by before it.
+    if (source) {
+        char buf[64];
+        int  res = snprintf(buf, sizeof(buf), "Source: %s", source);
+        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(buf), "source string too long");
+        lv_obj_t* src = lv_label_create(cont);
+        lv_label_set_text(src, buf);
+        lv_obj_set_style_text_color(src, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(src, ui_font(14), 0);
+    }
 
     lv_obj_t* lbl = lv_label_create(cont);
     lv_label_set_text(lbl, "Entropy:");

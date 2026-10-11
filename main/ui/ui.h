@@ -147,6 +147,16 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
 void ui_show_words_help(ui_cb_t on_close);
 
 /**
+ * @brief Explain the step before a generated seed exists: which source the bits
+ *        are read from and that those bits make up the seed.
+ *
+ * Shown when the user asks for a generated seed, since there is nothing to
+ * collect on it. @p source is the name of the random source and @p bits the
+ * size of the seed.
+ */
+void ui_show_generate_process(const char* source, uint32_t bits, ui_cb_t on_ok);
+
+/**
  * @brief Show the entropy merge in progress: the two input entropies, the XOR
  *        result and the animated bit view. The mnemonic words are only shown
  *        on the screen that follows Ok (the final stage).
@@ -158,8 +168,12 @@ void ui_show_merge_process(const char* current_entropy_hex, const char* new_entr
  * @brief Show a working seed as raw entropy: the hex value and the animated
  *        bit view. Used for the generated / entered / merged stages; the
  *        mnemonic words are only shown on the final stage.
+ *
+ * @p source names where the bytes came from, and is only shown when it is not
+ * NULL.
  */
-void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, ui_cb_t on_ok);
+void ui_show_entropy(const char* entropy_hex, mnemonic_type_t type, const char* source,
+                     ui_cb_t on_ok);
 void ui_show_msg(const char* msg);
 
 /**

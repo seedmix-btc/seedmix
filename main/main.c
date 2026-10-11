@@ -103,6 +103,9 @@ static void on_touch_cancel(void);
 static void on_touch_help(void);
 static void on_touch_continue(void);
 static void on_show_state(void);
+static void on_words_help(void);
+static void on_words_help_close(void);
+static void on_generate_continue(void);
 static void go_back_source(void);
 static void go_source(void);
 static void on_finish(void);
@@ -118,22 +121,23 @@ static void on_test_error(lv_event_t* e);
 static void show_main_screen(void);
 
 // Show the working seed as raw entropy; the words are only shown at the final
-// stage.
+// stage. `source` names where the bytes came from, and is only used by the source
+// that started the seed.
 static void show_entropy_screen(const uint8_t* entropy, size_t elen, mnemonic_type_t type,
-                                ui_cb_t on_ok) {
+                                const char* source, ui_cb_t on_ok) {
     ASSERT_OR_DIE(entropy, "null entropy");
     ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
 
     char hex[2 * 32 + 1];
     ASSERT_OR_DIE(bytes_to_hex(entropy, elen, hex, sizeof(hex)), "entropy hex buffer too small");
-    ui_show_entropy(hex, type, on_ok);
+    ui_show_entropy(hex, type, source, on_ok);
     secure_memzero(hex, sizeof(hex)); // the screen keeps its own copy
 }
 
 // Combine `entropy` into the working seed if the sizes match, otherwise drop it
 // and return to the source screen.
 static void merge_or_reject(const uint8_t* entropy, size_t elen, mnemonic_type_t result_type,
-                            const char* source_desc) {
+                            const char* source_desc, const char* source_name) {
     ASSERT_OR_DIE(entropy, "null source entropy");
     ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected source entropy length");
 
@@ -151,10 +155,19 @@ static void merge_or_reject(const uint8_t* entropy, size_t elen, mnemonic_type_t
     memcpy(current_entropy, entropy, elen);
     current_entropy_len = elen;
     ui_log_add("started with %s", source_desc);
-    show_entropy_screen(current_entropy, current_entropy_len, result_type, go_source);
+    show_entropy_screen(current_entropy, current_entropy_len, result_type, source_name, go_source);
 }
 
+// Generating has nothing to collect, so the page that explains where the bytes
+// come from takes the place of a collection screen, and the draw happens when it
+// is continued. The same is offered for every source: what is about to happen,
+// then what happened.
 static void on_generate(void) {
+    ui_show_generate_process(hal_get_random_source(), utils_word_count_bits(word_count),
+                             on_generate_continue);
+}
+
+static void on_generate_continue(void) {
     const size_t elen = utils_word_count_bytes(word_count); // 16 or 32
     ASSERT_OR_DIE(elen <= sizeof(current_entropy), "entropy length too large");
 
@@ -173,7 +186,7 @@ static void on_generate(void) {
                    utils_word_count_bits(word_count), hal_get_random_source());
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
 
-    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, hal_get_random_source());
     secure_memzero(entropy, sizeof(entropy));
 }
 
@@ -601,7 +614,7 @@ static void on_camera_use(void) {
     char desc[48];
     res = snprintf(desc, sizeof(desc), "camera image %u bits", utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, "camera image");
     secure_memzero(entropy, sizeof(entropy));
 }
 
@@ -706,7 +719,7 @@ static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t
     char     desc[48];
     int      res = snprintf(desc, sizeof(desc), "scanned %u-bit SeedQR", utils_word_count_bits(wc));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, desc, "scanned SeedQR");
     secure_memzero(entropy, sizeof(entropy));
     return true;
 }
@@ -1162,7 +1175,7 @@ static void on_dice_roll(uint8_t value) {
     int  res = snprintf(desc, sizeof(desc), "d%u dice %u bits (%u rolls)", sides,
                        utils_word_count_bits(word_count), rolls);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, "dice rolls");
     secure_memzero(entropy, sizeof(entropy));
 }
 
@@ -1231,7 +1244,7 @@ static void on_coin_flip(uint8_t value) {
     int  res = snprintf(desc, sizeof(desc), "coin flips %u bits (%u flips)",
                        utils_word_count_bits(word_count), flips);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, "coin flips");
     secure_memzero(entropy, sizeof(entropy));
 }
 
@@ -1318,7 +1331,7 @@ static void on_touch_continue(void) {
     int  res = snprintf(desc, sizeof(desc), "touch screen %u bits (%u taps)",
                        utils_word_count_bits(word_count), taps);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(touch_seed, elen, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(touch_seed, elen, MNEMONIC_TYPE_GENERATED, desc, "touch taps");
     secure_memzero(touch_seed, sizeof(touch_seed));
 }
 
@@ -1384,7 +1397,8 @@ static void on_we_complete(void) {
     secure_memzero(entropy, sizeof(entropy));
 
     // Show the entered seed and ask the user to confirm before it is used.
-    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, on_we_ok);
+    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, "typed words",
+                        on_we_ok);
 }
 
 static void on_we_ok(void) {
@@ -1404,7 +1418,7 @@ static void on_we_ok(void) {
         go_source();
         return;
     }
-    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, pending_desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, pending_desc, "typed words");
     secure_memzero(entropy, sizeof(entropy));
 }
 
@@ -1479,7 +1493,8 @@ static void on_we_word_selected(const char* last_word) {
     pending_entropy_len = elen;
     secure_memzero(entropy, sizeof(entropy));
 
-    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, on_we_ok);
+    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, "typed words",
+                        on_we_ok);
 }
 
 // -- Re-enter source with correct title based on state -----------------
