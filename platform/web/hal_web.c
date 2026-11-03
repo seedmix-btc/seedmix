@@ -93,10 +93,20 @@ hal_camera_t* hal_camera_open(void) {
                 audio : false
             })
             .then(function(stream) {
+                // The screen can be left while the permission prompt is up, and
+                // a newer session may even have replaced this one: stop what was
+                // granted rather than lighting the camera for a session that is
+                // gone (and leaving its tracks running).
+                if (Module.__seedmixCam != c) {
+                    var stale = stream.getTracks();
+                    for (var i = 0; i < stale.length; i++) stale[i].stop();
+                    return;
+                }
                 c.stream          = stream;
                 c.video.srcObject = stream;
                 c.video.addEventListener(
                     'loadedmetadata', function() {
+                        if (Module.__seedmixCam != c) return;
                         c.width  = c.video.videoWidth;
                         c.height = c.video.videoHeight;
                         if (c.width && c.height) {
@@ -108,6 +118,7 @@ hal_camera_t* hal_camera_open(void) {
                 return c.video.play();
             })
             .catch(function(err) {
+                if (Module.__seedmixCam != c) return; // stale session: nothing to report
                 console.error('seedmix: getUserMedia failed: ' + err);
                 c.ready = false;
             });
