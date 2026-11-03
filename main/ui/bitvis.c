@@ -45,9 +45,9 @@ static const uint8_t* xv_glyph(char c) {
 }
 
 #define XV_BG 0x0000u      // black
-#define XV_BIT_OFF 0x2124u // dark grey: 0 bit
+#define XV_BIT_OFF 0x3186u // mid grey: 0 bit
 #define XV_BIT_ON 0xFFFFu  // white: 1 bit in an operand
-#define XV_BIT_DIM 0x10A2u // nearly black: merged bit not scanned yet
+#define XV_BIT_DIM 0x2124u // dark grey: a bit that is not filled in yet
 #define XV_RES_ON 0x07E0u  // green: 1 bit in the result
 #define XV_CUR 0xFD20u     // orange: the bit being XORed now
 #define XV_HEX 0xBDF7u     // light grey: byte value
