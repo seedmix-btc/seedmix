@@ -31,7 +31,7 @@ secure_stack_t* secure_stack_create(size_t capacity) {
 }
 
 bool secure_stack_push(secure_stack_t* stack, uint8_t* data, size_t len) {
-    if (!data || stack->count >= stack->capacity) return false;
+    if (!stack || !data || stack->count >= stack->capacity) return false;
     stack->items[stack->count].data = data;
     stack->items[stack->count].len  = len;
     stack->count++;
