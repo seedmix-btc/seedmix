@@ -51,13 +51,16 @@ void touch_entropy_add_tap(touch_entropy_t* t, int32_t x, int32_t y) {
     ASSERT_OR_DIE(t, "null touch entropy");
     ASSERT_OR_DIE(!touch_entropy_ready(t), "touch entropy already complete");
 
-    // Snap the tap to its tile and write the tile's index as whole bits, most
-    // significant first. Clamping keeps a tap that lands on the very edge
-    // (x == res_x, say) inside the grid.
-    unsigned col = (unsigned)(((uint32_t)x) * TOUCH_TILES_PER_AXIS / t->res_x);
-    unsigned row = (unsigned)(((uint32_t)y) * TOUCH_TILES_PER_AXIS / t->res_y);
-    if (col >= TOUCH_TILES_PER_AXIS) col = TOUCH_TILES_PER_AXIS - 1u;
-    if (row >= TOUCH_TILES_PER_AXIS) row = TOUCH_TILES_PER_AXIS - 1u;
+    // Snap the tap to its tile, clamping to the panel first so a tap that lands
+    // just outside it - a negative coordinate from calibration, or one past the
+    // far edge - belongs to the nearest tile rather than the opposite one. The
+    // tile's index is then written as whole bits, most significant first.
+    uint64_t px = (x < 0) ? 0u : (uint64_t)x;
+    uint64_t py = (y < 0) ? 0u : (uint64_t)y;
+    if (px >= t->res_x) px = t->res_x - 1u;
+    if (py >= t->res_y) py = t->res_y - 1u;
+    const unsigned col  = (unsigned)(px * TOUCH_TILES_PER_AXIS / t->res_x);
+    const unsigned row  = (unsigned)(py * TOUCH_TILES_PER_AXIS / t->res_y);
     const unsigned tile = row * TOUCH_TILES_PER_AXIS + col;
 
     for (unsigned i = TOUCH_BITS_PER_TAP; i-- > 0;) touch_append_bit(t, (tile >> i) & 1u);

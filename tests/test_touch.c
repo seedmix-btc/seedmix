@@ -40,10 +40,25 @@ static void test_tap_writes_its_tile_as_bits(void) {
 }
 
 static void test_edge_and_out_of_range_taps_clamp(void) {
-    // A tap on the far edge must still land in the last tile, not past it.
     touch_entropy_t* t = touch_entropy_begin(12, 480, 320);
+    // A tap on the far edge must still land in the last tile, not past it.
     touch_entropy_add_tap(t, 480, 320); // one past the last pixel
     TEST_ASSERT_EQUAL_UINT(63, touch_entropy_last_tile(t));
+
+    touch_entropy_add_tap(t, 0, 320); // bottom-left
+    TEST_ASSERT_EQUAL_UINT(56, touch_entropy_last_tile(t));
+
+    touch_entropy_add_tap(t, 480, 0); // top-right
+    TEST_ASSERT_EQUAL_UINT(7, touch_entropy_last_tile(t));
+
+    // A tap just outside the near edge belongs to the first tile, not the far
+    // one (a negative coordinate must not wrap round to the last tile).
+    touch_entropy_add_tap(t, -1, -1);
+    TEST_ASSERT_EQUAL_UINT(0, touch_entropy_last_tile(t));
+
+    touch_entropy_add_tap(t, -1000, 200); // left edge, row 5
+    TEST_ASSERT_EQUAL_UINT(40, touch_entropy_last_tile(t));
+
     touch_entropy_discard(t);
 }
 
