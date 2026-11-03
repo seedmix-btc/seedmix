@@ -155,7 +155,16 @@ esp_err_t touchscreen_init(void) {
 #endif
 
     s_indev = lv_indev_create();
-    ESP_RETURN_ON_FALSE(s_indev, ESP_ERR_NO_MEM, TAG, "lv_indev_create failed");
+    if (!s_indev) {
+        // Nothing points at the touch controller or its panel IO any more, so
+        // release both rather than leaving them allocated behind a NULL indev.
+        ESP_LOGE(TAG, "lv_indev_create failed");
+        esp_lcd_touch_del(s_touch);
+        s_touch = NULL;
+        esp_lcd_panel_io_del(s_touch_io);
+        s_touch_io = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     lv_indev_set_type(s_indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(s_indev, touchscreen_read_cb);
     lv_indev_set_display(s_indev, lv_display_get_default());
