@@ -49,7 +49,8 @@ else
         find "$PROJECT_ROOT" \
             \( -path "$PROJECT_ROOT/build*" -o \
                -path "$PROJECT_ROOT/external" -o \
-               -path "$PROJECT_ROOT/lvgl" \) -prune -o \
+               -path "$PROJECT_ROOT/lvgl" -o \
+               -path "*managed_components*" \) -prune -o \
             \( -name '*.c' -o -name '*.h' \) -print
     )
 fi
