@@ -153,6 +153,21 @@ static void merge_or_reject(const uint8_t* entropy, size_t elen, mnemonic_type_t
         return;
     }
     if (current_entropy_len) {
+        // XORing a source with the seed already in use leaves an all-zero seed
+        bool same = true;
+        for (size_t i = 0; i < elen; i++) {
+            if (current_entropy[i] != entropy[i]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            ui_log_add("rejected %s: same as the working seed", source_desc);
+            ui_show_msg("Same seed as the one in use - input discarded");
+            ui_delay_ms(1500);
+            go_source();
+            return;
+        }
         show_merge_screen(entropy, elen, source_desc);
         return;
     }
@@ -1453,6 +1468,7 @@ static void on_we_ok(void) {
         // First source: the entered seed was already shown for approval.
         memcpy(current_entropy, entropy, elen);
         current_entropy_len = elen;
+        secure_memzero(entropy, sizeof(entropy));
         ui_log_add("started with %s", pending_desc);
         secure_memzero(pending_desc, sizeof(pending_desc));
         go_source();

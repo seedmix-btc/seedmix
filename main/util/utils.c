@@ -77,20 +77,20 @@ void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t ou
     ASSERT_OR_DIE(out && out_len > 0, "sha256_expand: invalid output");
 
     uint8_t seed[SHA256_LEN];
+    uint8_t block[4 + SHA256_LEN];
+    uint8_t h[SHA256_LEN];
     ASSERT_OR_DIE(wally_sha256(data, data_len, seed, SHA256_LEN) == WALLY_OK,
                   "sha256_expand: SHA-256 failed");
 
     uint32_t counter = 0;
     size_t   off     = 0;
     while (off < out_len) {
-        uint8_t block[4 + SHA256_LEN];
         block[0] = (uint8_t)(counter >> 24);
         block[1] = (uint8_t)(counter >> 16);
         block[2] = (uint8_t)(counter >> 8);
         block[3] = (uint8_t)(counter);
         memcpy(block + 4, seed, SHA256_LEN);
 
-        uint8_t h[SHA256_LEN];
         ASSERT_OR_DIE(wally_sha256(block, sizeof(block), h, SHA256_LEN) == WALLY_OK,
                       "sha256_expand: SHA-256 failed");
 
@@ -101,7 +101,10 @@ void sha256_expand(const uint8_t* data, size_t data_len, uint8_t* out, size_t ou
         counter++;
     }
 
+    // The working state is the seed and its derived blocks: wipe all of it.
     secure_memzero(seed, sizeof(seed));
+    secure_memzero(block, sizeof(block));
+    secure_memzero(h, sizeof(h));
 }
 
 void utils_bit_window(const uint8_t* src, size_t from, unsigned n, uint8_t* out) {

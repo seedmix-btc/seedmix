@@ -4,6 +4,7 @@
  */
 
 #include "qr.h"
+#include "util/utils.h"
 
 #include <qrencode.h>
 #include <quirc.h>
@@ -54,6 +55,8 @@ bool qr_encode(const uint8_t* data, size_t len, qr_mode_t mode, qr_grid_t* out) 
 
 void qr_grid_free(qr_grid_t* g) {
     if (!g) return;
+    // A SeedQR grid is the seed itself: wipe it before the memory is reused.
+    if (g->cells && g->size) secure_memzero(g->cells, (size_t)g->size * (size_t)g->size);
     free(g->cells);
     g->cells = NULL;
     g->size  = 0;
