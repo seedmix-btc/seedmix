@@ -1171,6 +1171,7 @@ static const mnemonic_bits_t* current_bits(void) {
     bits_bundle.entropy     = bits_entropy;
     bits_bundle.entropy_len = elen;
     bits_bundle.indices     = bits_indices;
+    bits_bundle.index_count = count;
     return &bits_bundle;
 }
 

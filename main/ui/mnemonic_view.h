@@ -24,6 +24,7 @@ typedef struct {
     const uint8_t*  entropy;     // the bits the words were cut from
     size_t          entropy_len; // 16 or 32
     const uint16_t* indices;     // one word list index per word
+    size_t          index_count; // how many entries `indices` holds
 } mnemonic_bits_t;
 
 /**

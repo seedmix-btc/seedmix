@@ -75,24 +75,34 @@ void ui_mnemonic_view_set_words(lv_obj_t* view, const char* words, const mnemoni
     lv_obj_clean(view);
 
     // The source bits are optional; without them a box is just a numbered word.
-    const bool with_bits = bits && bits->entropy && bits->indices &&
+    // Indices without a count cannot be bounds-checked, so treat that as a bug.
+    ASSERT_OR_DIE(!bits || !bits->indices || bits->index_count > 0, "indices without a count");
+    const bool with_bits = bits && bits->entropy && bits->indices && bits->index_count &&
                            (bits->entropy_len == 16 || bits->entropy_len == 32);
 
     /* Tokenize into a local array.  lv_label_set_text() copies the text, so
-     * pointers into this buffer are only needed while building the cells. */
-    char buf[512];
-    strncpy(buf, words, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+     * pointers into this buffer are only needed while building the cells.  A
+     * word list that does not fit would be shown as a different mnemonic, so
+     * refuse it instead of truncating. */
+    char         buf[512];
+    const size_t words_len = strlen(words);
+    ASSERT_OR_DIE(words_len < sizeof(buf), "mnemonic text too long (%zu bytes)", words_len);
+    memcpy(buf, words, words_len + 1);
 
     const char* word[MNEMONIC_VIEW_MAX_WORDS];
     size_t      count   = 0;
     char*       saveptr = NULL;
-    for (char* tok = strtok_r(buf, " \t\n", &saveptr); tok && count < MNEMONIC_VIEW_MAX_WORDS;
+    for (char* tok = strtok_r(buf, " \t\n", &saveptr); tok;
          tok       = strtok_r(NULL, " \t\n", &saveptr)) {
+        ASSERT_OR_DIE(count < MNEMONIC_VIEW_MAX_WORDS, "too many words (%zu)", count + 1);
         word[count++] = tok;
     }
 
     if (count == 0) return;
+
+    // Each box shows bits->indices[i]; there must be one for every word shown.
+    ASSERT_OR_DIE(!with_bits || bits->index_count >= count, "%zu word indices for %zu words",
+                  bits->index_count, count);
 
     unsigned cols = ui_small_screen() ? MNEMONIC_VIEW_COLS_SMALL : MNEMONIC_VIEW_COLS_LARGE;
     unsigned rows = (unsigned)((count + cols - 1) / cols);
