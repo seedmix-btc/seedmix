@@ -84,7 +84,8 @@ typedef struct {
  *
  * @p cells should be as wide as the die's longest part, i.e. the most bits one
  * roll can contribute (up to 16); a roll worth fewer shows just those bits, and
- * the cells past them stay dark. Drawn with
+ * the cells past them stay dark - or, with bitvis_roll_set_fit(), the block
+ * itself narrows to them. Drawn with
  * the same cells, colours and font as the grid, so build it against the same
  * @p screen and it lines up with it.  @p r must outlive @p screen: its widgets
  * are released when @p screen is deleted, after which bitvis_roll_set() does
@@ -105,6 +106,19 @@ void bitvis_roll_create(bitvis_roll_t* r, lv_obj_t* parent, lv_obj_t* screen, un
  */
 void bitvis_roll_set(bitvis_roll_t* r, const char* label, const uint8_t* bytes,
                      uint32_t filled_bits, uint32_t nbits);
+
+/**
+ * @brief Show @p label above the newest @p nbits bits, in a block only that wide.
+ *
+ * Same as bitvis_roll_set(), except the block is as wide as the bits the input
+ * produced instead of the widest input it could take: spare cells are dropped
+ * rather than drawn dark. Use it for sources whose inputs pay a different
+ * number of bits each, e.g. a d6 (two bits for faces 1-4, one for 5 and 6), so
+ * the readout shows exactly what the last input was worth. @p nbits == 0 keeps
+ * the widest block with every cell unknown.
+ */
+void bitvis_roll_set_fit(bitvis_roll_t* r, const char* label, const uint8_t* bytes,
+                         uint32_t filled_bits, uint32_t nbits);
 /**
  * @brief Colour a roll readout's bits, for a value that is not the input's own.
  *

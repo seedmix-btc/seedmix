@@ -737,8 +737,9 @@ static void meter_rate_create(entropy_meter_t* m, lv_obj_t* parent) {
 }
 
 // Build the counts + newest-input block, the rate row and the bit grid, inside
-// @p parent. The block gets @p block_cells cells, the most bits one input can
-// add; @p prompt shows until the first input.
+// @p parent. The block is at most @p block_cells cells wide, the most bits one
+// input can add, and narrows to the bits the newest input paid; @p prompt shows
+// until the first input.
 static void meter_create(entropy_meter_t* m, lv_obj_t* parent, lv_obj_t* screen,
                          uint32_t total_bits, unsigned block_cells, unsigned rate_milli,
                          const char* singular, const char* plural, const char* prompt) {
@@ -800,8 +801,10 @@ static void meter_set(entropy_meter_t* m, const uint8_t* bytes, unsigned count, 
         if (rt > 0 && (size_t)rt < sizeof(est)) lv_label_set_text(m->togo, est);
     }
 
-    // Both show the bits the newest input produced.
-    bitvis_roll_set(&m->roll, face, bytes, filled, last_bits);
+    // Both show the bits the newest input produced. The block narrows to them,
+    // so a source that pays a different number of bits each time (a d6 pays two
+    // for faces 1-4 and one for 5 and 6) shows exactly what the input was worth.
+    bitvis_roll_set_fit(&m->roll, face, bytes, filled, last_bits);
     bitvis_grid_set(&m->grid, bytes, filled, filled - last_bits);
 }
 

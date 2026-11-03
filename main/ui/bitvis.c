@@ -477,16 +477,22 @@ typedef struct {
     bitvis_roll_t* owner;
     lv_obj_t*      img;
     lv_image_dsc_t dsc;
-    uint16_t*      buf;
-    size_t         buf_bytes;
+    uint16_t*      buf;       // room for the widest input; stride is always r->w
+    size_t         buf_bytes; // what buf holds, for the wipe on delete
     lv_coord_t     w, h, cell, gap, pad;
-    unsigned       cells;
+    unsigned       cells;  // the most bits one input can add
+    unsigned       shown;  // the cells the block draws now
     uint8_t        win[2]; // the bits the block shows, left-aligned
     unsigned       nbits;
     uint16_t       col_on, col_off;
     char           label[8];
     lv_obj_t*      screen;
 } rollview_t;
+
+/* The block's width: the cells it draws plus the padding around them. */
+static lv_coord_t xrv_width(const rollview_t* r, unsigned cells) {
+    return (lv_coord_t)cells * r->cell + (lv_coord_t)(cells - 1) * r->gap + 2 * r->pad;
+}
 
 /* Wipe the block and draw the label centred over the bit cells. */
 static void xrv_chrome(rollview_t* r) {
@@ -500,9 +506,9 @@ static void xrv_chrome(rollview_t* r) {
 
 /* Draw the bits, most significant first; the cells past them stay unknown. */
 static void xrv_bits(rollview_t* r) {
-    lv_coord_t strip_w = (lv_coord_t)r->cells * r->cell + (lv_coord_t)(r->cells - 1) * r->gap;
+    lv_coord_t strip_w = (lv_coord_t)r->shown * r->cell + (lv_coord_t)(r->shown - 1) * r->gap;
     lv_coord_t x       = (r->w - strip_w) / 2;
-    for (unsigned b = 0; b < r->cells; b++) {
+    for (unsigned b = 0; b < r->shown; b++) {
         uint16_t color = XV_BIT_DIM;
         if (b < r->nbits) {
             color = ((r->win[b >> 3] >> (7 - (b & 7u))) & 1u) ? r->col_on : r->col_off;
@@ -537,11 +543,14 @@ void bitvis_roll_create(bitvis_roll_t* h, lv_obj_t* parent, lv_obj_t* screen, un
     r->owner  = h;
     r->screen = screen;
     r->cells  = cells;
+    r->shown  = cells;
 
     lv_coord_t cols = 0, block_w = 0;
     xv_metrics(&cols, &block_w, &r->cell, &r->gap, &r->pad);
     // Snug around the cells, and as tall as one grid row so the bit rows line up.
-    r->w         = (lv_coord_t)cells * r->cell + (lv_coord_t)(cells - 1) * r->gap + 2 * r->pad;
+    // The buffer has room for the widest input; a fitted block then uses only its
+    // first w x h pixels, laid out with the narrower stride.
+    r->w         = xrv_width(r, cells);
     r->h         = XV_BIT_Y + r->cell + ui_scale(4);
     r->buf_bytes = (size_t)r->w * (size_t)r->h * 2u;
     r->buf       = malloc(r->buf_bytes);
@@ -570,12 +579,13 @@ void bitvis_roll_create(bitvis_roll_t* h, lv_obj_t* parent, lv_obj_t* screen, un
     lv_obj_add_event_cb(screen, xrv_cleanup, LV_EVENT_DELETE, r);
 }
 
-void bitvis_roll_set(bitvis_roll_t* h, const char* label, const uint8_t* bytes,
-                     uint32_t filled_bits, uint32_t nbits) {
+static void xrv_show(bitvis_roll_t* h, const char* label, const uint8_t* bytes,
+                     uint32_t filled_bits, uint32_t nbits, bool fit) {
     if (!h || !h->priv) return; // the screen is gone
     rollview_t* r = h->priv;
     ASSERT_OR_DIE(label, "bitvis: null roll label");
     ASSERT_OR_DIE(nbits <= filled_bits, "bitvis: bad roll bit count");
+    ASSERT_OR_DIE(nbits <= r->cells, "bitvis: roll wider than its block");
 
     snprintf(r->label, sizeof(r->label), "%s", label);
 
@@ -585,8 +595,35 @@ void bitvis_roll_set(bitvis_roll_t* h, const char* label, const uint8_t* bytes,
     if (nbits) utils_bit_window(bytes, filled_bits - nbits, nbits, r->win);
     r->nbits = nbits;
 
+    // A fitted block is only as wide as the bits it shows; an unfitted one keeps
+    // the width of the widest input, its spare cells drawn dark.
+    const unsigned shown = (fit && nbits) ? (unsigned)nbits : r->cells;
+    if (shown != r->shown) {
+        const lv_coord_t w   = xrv_width(r, shown);
+        r->shown             = shown;
+        r->w                 = w;
+        r->dsc.header.w      = (uint16_t)w;
+        r->dsc.header.stride = (uint16_t)(w * 2);
+        r->dsc.data_size     = (uint32_t)((size_t)w * (size_t)r->h * 2u);
+        if (r->img) {
+            // LVGL caches the source size, so re-point it before resizing.
+            lv_image_set_src(r->img, &r->dsc);
+            lv_obj_set_size(r->img, r->w, r->h);
+        }
+    }
+
     xrv_chrome(r);
     xrv_bits(r);
+}
+
+void bitvis_roll_set(bitvis_roll_t* h, const char* label, const uint8_t* bytes,
+                     uint32_t filled_bits, uint32_t nbits) {
+    xrv_show(h, label, bytes, filled_bits, nbits, false);
+}
+
+void bitvis_roll_set_fit(bitvis_roll_t* h, const char* label, const uint8_t* bytes,
+                         uint32_t filled_bits, uint32_t nbits) {
+    xrv_show(h, label, bytes, filled_bits, nbits, true);
 }
 
 void bitvis_roll_set_colors(bitvis_roll_t* h, uint16_t on, uint16_t off) {
