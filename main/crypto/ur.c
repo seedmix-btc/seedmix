@@ -520,6 +520,7 @@ static bool cbor_read_bytes(const uint8_t* buf, size_t len, size_t* pos, const u
 static bool cbor_decode_part(const uint8_t* buf, size_t len, uint32_t* seq_num, size_t* seq_len,
                              size_t* message_len, uint32_t* checksum, const uint8_t** data,
                              size_t* data_len) {
+    if (!buf || len == 0) return false;
     size_t  pos   = 0;
     size_t  count = 0;
     uint8_t ib    = buf[pos++];

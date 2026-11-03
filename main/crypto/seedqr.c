@@ -12,7 +12,6 @@
 #include "bip39_wordlist.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 size_t seedqr_compact_encode(const mnemonic_t* m, uint8_t* out, size_t out_cap) {
@@ -84,9 +83,13 @@ mnemonic_t* seedqr_standard_decode(const char* digits) {
         memcpy(grp, digits + i * 4, 4);
         grp[4] = '\0';
 
-        char*         end = NULL;
-        unsigned long idx = strtoul(grp, &end, 10);
-        if (end != grp + 4 || idx >= BIP39_WORD_COUNT) return NULL;
+        // Exactly four decimal digits
+        unsigned idx = 0;
+        for (size_t d = 0; d < 4; d++) {
+            if (grp[d] < '0' || grp[d] > '9') return NULL;
+            idx = idx * 10u + (unsigned)(grp[d] - '0');
+        }
+        if (idx >= BIP39_WORD_COUNT) return NULL;
 
         const char* word = bip39_wordlist_word((size_t)idx);
         if (!word) return NULL;

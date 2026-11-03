@@ -136,6 +136,7 @@ static void we_select_word(lv_event_t* e) {
     const char* word = lv_label_get_text(lv_event_get_target(e));
     if (word && *word) {
         strncpy(c->selected, word, sizeof(c->selected) - 1);
+        c->selected[sizeof(c->selected) - 1] = '\0';
         // show confirm screen
         lv_obj_t* s     = ui_make_screen();
         lv_obj_t* title = lv_label_create(s);
@@ -169,7 +170,12 @@ static void we_confirm(lv_event_t* e) {
     memcpy(c->prefix, c->selected, copy);
     c->prefix[copy] = '\0';
     c->selected[0]  = '\0';
-    ui_word_entry_next(c); // loads entry_screen first
+    // next() loads the entry screen itself; when it refuses the word (and the
+    // handle is therefore still alive) put the entry screen back by hand.
+    if (!ui_word_entry_next(c) && c->entry_screen && lv_screen_active() != c->entry_screen) {
+        ui_nav_build(c->entry_screen);
+        lv_scr_load(c->entry_screen);
+    }
     lv_obj_delete(confirm_screen);
 }
 
@@ -355,10 +361,19 @@ void ui_word_entry_reshow(word_entry_handle_t handle) {
 bool ui_word_entry_next(word_entry_handle_t handle) {
     we_ctx_t* c = (we_ctx_t*)handle;
     ASSERT_OR_DIE(c, "null context");
+
+    // Only a word from the list may be entered: the typed text is a filter, so
+    // nothing typed (or a prefix that matches nothing) contributes nothing.
+    if (!c->prefix[0]) return false;
     const char* matches[2048];
-    size_t      n    = we_lookup(c, c->prefix, matches);
-    const char* word = (n > 0) ? matches[0] : c->prefix;
-    if (!word[0]) return false;
+    if (we_lookup(c, c->prefix, matches) == 0) return false;
+    const char* word = matches[0];
+
+    // Reserve the separator (after the first word) plus the word itself, and
+    // refuse rather than overrun the buffer.
+    const size_t have = strlen(c->result);
+    const size_t need = strlen(word) + (c->current > 0 ? 1u : 0u);
+    if (have + need >= sizeof(c->result)) return false;
 
     if (c->current > 0) strcat(c->result, " ");
     strcat(c->result, word);

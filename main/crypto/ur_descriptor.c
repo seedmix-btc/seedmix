@@ -152,22 +152,26 @@ static cbor_val_t* cbor_parse(const uint8_t* buf, size_t len, size_t* used, int 
     }
     case 2:
     case 3: { /* byte / text string */
-        if (*used + arg > len) return NULL;
+        // `arg` is attacker-controlled: compare subtractively so the sum cannot wrap.
+        if (*used > len || arg > (uint64_t)(len - *used)) return NULL;
         cbor_val_t* v = cbor_new(major == 2 ? CBOR_BYTES : CBOR_TEXT);
         if (!v) return NULL;
-        v->data = malloc(arg ? arg : 1);
+        v->data = malloc(arg ? (size_t)arg : 1);
         if (!v->data) {
             cbor_free(v);
             return NULL;
         }
-        memcpy(v->data, buf + *used, arg);
-        v->len = arg;
-        *used += arg;
+        memcpy(v->data, buf + *used, (size_t)arg);
+        v->len = (size_t)arg;
+        *used += (size_t)arg;
         return v;
     }
     case 4:
     case 5: { /* array / map */
-        size_t n = (major == 5) ? arg * 2 : arg;
+        // A map is two entries per pair: check the doubling cannot wrap, and
+        // bound the count before anything is allocated for it.
+        if (arg > SIZE_MAX || (major == 5 && arg > SIZE_MAX / 2u)) return NULL;
+        const size_t n = (size_t)arg * ((major == 5) ? 2u : 1u);
         if (n > CBOR_NODE_BUDGET) return NULL;
         cbor_val_t* v = cbor_new(major == 4 ? CBOR_ARRAY : CBOR_MAP);
         if (!v) return NULL;

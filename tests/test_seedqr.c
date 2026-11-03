@@ -232,11 +232,29 @@ static void test_standard_decode_rejects_non_digit(void) {
     char s[SEEDQR_STANDARD_12_DIGITS + 1];
     memset(s, '0', SEEDQR_STANDARD_12_DIGITS);
     s[SEEDQR_STANDARD_12_DIGITS] = '\0';
-    s[0]                         = 'a'; // strtoul consumes nothing -> rejected
+    s[0]                         = 'a'; // not a digit -> rejected
     TEST_ASSERT_NULL(seedqr_standard_decode(s));
 
     memset(s, '0', SEEDQR_STANDARD_12_DIGITS);
     s[4] = '-';
+    TEST_ASSERT_NULL(seedqr_standard_decode(s));
+}
+
+/* A payload that is not four digits per word must be rejected by the parser itself. */
+static void test_standard_decode_rejects_space_and_sign(void) {
+    char s[SEEDQR_STANDARD_12_DIGITS + 1];
+    memset(s, '0', SEEDQR_STANDARD_12_DIGITS);
+    memcpy(s + SEEDQR_STANDARD_12_DIGITS - 4, "0003", 4); // ... abandon, about
+    s[SEEDQR_STANDARD_12_DIGITS] = '\0';
+
+    mnemonic_t* ok = seedqr_standard_decode(s);
+    TEST_ASSERT_NOT_NULL(ok); // the unmodified digits are a valid SeedQR
+    mnemonic_discard(ok);
+
+    s[0] = ' '; // leading space is invalid
+    TEST_ASSERT_NULL(seedqr_standard_decode(s));
+
+    s[0] = '+'; // leading plus sign is invalid
     TEST_ASSERT_NULL(seedqr_standard_decode(s));
 }
 
@@ -287,6 +305,7 @@ int main(void) {
     RUN_TEST(test_compact_encode_short_buffer);
     RUN_TEST(test_standard_decode_null_and_bad_length);
     RUN_TEST(test_standard_decode_rejects_non_digit);
+    RUN_TEST(test_standard_decode_rejects_space_and_sign);
     RUN_TEST(test_standard_decode_rejects_bad_index);
     RUN_TEST(test_standard_decode_rejects_bad_checksum);
     RUN_TEST(test_standard_encode_error_paths);
