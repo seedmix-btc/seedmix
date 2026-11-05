@@ -50,7 +50,16 @@ void ui_camera_feed_update(const uint8_t* rgb565, uint32_t w, uint32_t h);
 void ui_camera_feed_stats(unsigned frames, uint64_t bytes);
 /** @brief Show how the camera's frames become the seed (help screen). */
 void ui_show_camera_help(ui_cb_t on_close);
-void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done);
+/**
+ * @brief Show an exported SeedQR full-screen.
+ *
+ * @param cells   QR modules, `size` x `size`, 1 = dark.
+ * @param size    Modules per side.
+ * @param caption Which SeedQR form the code holds ("Compact", "Standard"), shown
+ *                under the title; NULL for none.
+ * @param on_done Done button.
+ */
+void ui_show_seedqr(const uint8_t* cells, uint32_t size, const char* caption, ui_cb_t on_done);
 void ui_seedqr_cleanup(void);
 void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file,
                           ui_cb_t on_help);

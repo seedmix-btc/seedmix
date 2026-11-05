@@ -90,6 +90,7 @@ static void on_descriptor_overview_continue(void);
 static void on_descriptor_overview_cancel(void);
 static void start_tx_scan(void);
 static void on_export_seedqr(void);
+static void on_seedqr_format(uint8_t format);
 static void on_export_done(void);
 static void on_dice_rolls(void);
 static void on_coin_flips(void);
@@ -1122,23 +1123,55 @@ static bool on_tx_payload(qr_source_t source, const uint8_t* payload, size_t ple
     return true;
 }
 
+/* Which SeedQR to export: Compact or Standard */
+enum { SEEDQR_FORMAT_COMPACT = 0, SEEDQR_FORMAT_STANDARD = 1 };
+
 static void on_export_seedqr(void) {
     if (!final_mnemonic) {
         ui_go_main();
         return;
     }
 
-    uint8_t entropy[32];
-    size_t  n = seedqr_compact_encode(final_mnemonic, entropy, sizeof(entropy));
-    ASSERT_OR_DIE(n == 16 || n == 32, "unexpected entropy length");
+    static const char* const formats[] = {"Compact SeedQR", "Standard SeedQR"};
+    ui_show_choice("Export SeedQR",
+                   "Compact encodes the raw entropy bytes, not the mnemonic words. Standard "
+                   "encodes four digits for each word.",
+                   formats, sizeof(formats) / sizeof(formats[0]), on_seedqr_format,
+                   show_final_screen);
+}
 
-    if (!qr_encode(entropy, n, QR_MODE_BYTE, &exported_qr)) {
-        secure_memzero(entropy, sizeof(entropy));
-        FATAL("SeedQR encode failed");
+static void on_seedqr_format(uint8_t format) {
+    if (!final_mnemonic) {
+        ui_go_main();
+        return;
     }
-    secure_memzero(entropy, sizeof(entropy));
 
-    ui_show_seedqr(exported_qr.cells, exported_qr.size, on_export_done);
+    const char* caption = "Compact";
+    if (format == SEEDQR_FORMAT_STANDARD) {
+        // The digits are the seed written as word numbers, so wipe them too.
+        char   digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        size_t n = seedqr_standard_encode(final_mnemonic, digits, sizeof(digits));
+        if (n != SEEDQR_STANDARD_12_DIGITS && n != SEEDQR_STANDARD_24_DIGITS) {
+            secure_memzero(digits, sizeof(digits));
+            FATAL("SeedQR encode failed");
+        }
+        const bool ok = qr_encode((const uint8_t*)digits, n, QR_MODE_NUMERIC, &exported_qr);
+        secure_memzero(digits, sizeof(digits));
+        if (!ok) FATAL("SeedQR encode failed");
+        caption = "Standard";
+    } else {
+        uint8_t entropy[32];
+        size_t  n = seedqr_compact_encode(final_mnemonic, entropy, sizeof(entropy));
+        if (n != 16 && n != 32) {
+            secure_memzero(entropy, sizeof(entropy));
+            FATAL("SeedQR encode failed");
+        }
+        const bool ok = qr_encode(entropy, n, QR_MODE_BYTE, &exported_qr);
+        secure_memzero(entropy, sizeof(entropy));
+        if (!ok) FATAL("SeedQR encode failed");
+    }
+
+    ui_show_seedqr(exported_qr.cells, exported_qr.size, caption, on_export_done);
 }
 
 static void on_export_done(void) {

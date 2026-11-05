@@ -3,6 +3,8 @@
  * @brief Round-trip tests for main/qr/qr.c (libqrencode encode -> quirc decode).
  */
 
+#include "crypto/mnemonic.h"
+#include "crypto/seedqr.h"
 #include "qr/qr.h"
 #include "unity.h"
 
@@ -138,6 +140,58 @@ static void test_rejects_empty_payload(void) {
     free(g.cells);
 }
 
+/* Both SeedQR forms the final screen can export, end to end: mnemonic -> code
+ * -> QR -> decoded payload -> mnemonic.  Whichever one the user picks has to
+ * read back as the seed they were shown. */
+static void test_seedqr_forms_roundtrip(void) {
+    const uint8_t e[16] = {42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57};
+    mnemonic_t*   m     = mnemonic_from_entropy(e, sizeof(e));
+    TEST_ASSERT_NOT_NULL(m);
+
+    uint32_t  w = 0, h = 0;
+    uint8_t   payload[256];
+    size_t    out_len = 0;
+    qr_grid_t g       = {0};
+
+    /* Compact: the entropy bytes, in byte mode. */
+    uint8_t compact[32];
+    size_t  n = seedqr_compact_encode(m, compact, sizeof(compact));
+    TEST_ASSERT_EQUAL_UINT(16, (unsigned)n);
+    TEST_ASSERT_TRUE(qr_encode(compact, n, QR_MODE_BYTE, &g));
+
+    uint8_t* img = grid_to_gray(&g, 4, 4, &w, &h);
+    TEST_ASSERT_TRUE(qr_decode(img, w, h, payload, sizeof(payload), &out_len));
+    free(img);
+    qr_grid_free(&g);
+
+    mnemonic_t* back = seedqr_compact_decode(payload, out_len);
+    TEST_ASSERT_NOT_NULL(back);
+    TEST_ASSERT_EQUAL_STRING(mnemonic_words(m), mnemonic_words(back));
+    mnemonic_discard(back);
+
+    /* Standard: four digits a word, in numeric mode. */
+    char digits[SEEDQR_STANDARD_24_DIGITS + 1];
+    n = seedqr_standard_encode(m, digits, sizeof(digits));
+    TEST_ASSERT_EQUAL_UINT(SEEDQR_STANDARD_12_DIGITS, (unsigned)n);
+    TEST_ASSERT_TRUE(qr_encode((const uint8_t*)digits, n, QR_MODE_NUMERIC, &g));
+
+    img = grid_to_gray(&g, 4, 4, &w, &h);
+    TEST_ASSERT_TRUE(qr_decode(img, w, h, payload, sizeof(payload), &out_len));
+    free(img);
+    qr_grid_free(&g);
+    TEST_ASSERT_EQUAL_UINT((unsigned)n, (unsigned)out_len);
+    TEST_ASSERT_EQUAL_MEMORY(digits, payload, out_len);
+
+    char raw[SEEDQR_STANDARD_24_DIGITS + 1];
+    memcpy(raw, payload, out_len);
+    raw[out_len] = '\0';
+    back         = seedqr_standard_decode(raw);
+    TEST_ASSERT_NOT_NULL(back);
+    TEST_ASSERT_EQUAL_STRING(mnemonic_words(m), mnemonic_words(back));
+    mnemonic_discard(back);
+    mnemonic_discard(m);
+}
+
 static void test_encode_guards(void) {
     const uint8_t data[16] = {0};
     qr_grid_t     g        = {0};
@@ -202,6 +256,7 @@ int main(void) {
     RUN_TEST(test_compact_24);
     RUN_TEST(test_standard_12);
     RUN_TEST(test_standard_24);
+    RUN_TEST(test_seedqr_forms_roundtrip);
     RUN_TEST(test_rejects_oversized_frame);
     RUN_TEST(test_rejects_empty_payload);
     RUN_TEST(test_encode_guards);

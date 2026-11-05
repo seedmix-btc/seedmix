@@ -1798,7 +1798,7 @@ void ui_show_seedqr_help(ui_cb_t on_close) {
     ui_swap_screen(s);
 }
 
-void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done) {
+void ui_show_seedqr(const uint8_t* cells, uint32_t size, const char* caption, ui_cb_t on_done) {
     ASSERT_OR_DIE(cells, "null cells");
     ASSERT_OR_DIE(on_done, "null on_done");
 
@@ -1811,6 +1811,16 @@ void ui_show_seedqr(const uint8_t* cells, uint32_t size, ui_cb_t on_done) {
     lv_obj_set_style_text_color(t, lv_color_white(), 0);
     lv_obj_set_style_text_font(t, ui_font(28), 0);
     lv_obj_align(t, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(15));
+
+    // Which form the code holds, so the code on screen can be named when the
+    // other wallet asks.
+    if (caption && caption[0]) {
+        lv_obj_t* cap = lv_label_create(s);
+        lv_label_set_text(cap, caption);
+        lv_obj_set_style_text_color(cap, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(cap, ui_font(16), 0);
+        lv_obj_align(cap, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(48));
+    }
 
     // White quiet-zone border (4 modules), then the data modules
     uint32_t border = 4;
