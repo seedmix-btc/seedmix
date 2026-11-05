@@ -45,9 +45,25 @@ SeedQR vectors in the SeedSigner format (`docs/seed_qr/README.md`).
 |----------|----------|
 | `raw/`   | `<slug>.compact.bin` (raw 16/32-byte entropy = CompactSeedQR), `<slug>.standard.txt` (48/96 BIP-39 index digits = Standard SeedQR), `<slug>.mnemonic.txt` (the mnemonic, for reference) |
 | `qr-png/`| `<slug>.compact.png` and `<slug>.standard.png` |
+| `spec/`  | `seedsigner.txt`: the test vectors published in SeedSigner's SeedQR specification (not generated here - see below) |
 
 `bip39_english.txt` is the BIP-39 English word list used to derive the
 Standard SeedQR digit streams.
+
+`spec/seedsigner.txt` is the reference the `raw/` vectors are checked against,
+so it is *not* produced by `gen_vectors.py`. It is copied from
+[SeedSigner's SeedQR specification](https://github.com/SeedSigner/seedsigner/blob/dev/docs/seed_qr/README.md)
+by [`../../scripts/check_seedqr_vectors.py`](../../scripts/check_seedqr_vectors.py):
+
+```
+python scripts/check_seedqr_vectors.py           # does the copy still match upstream?
+python scripts/check_seedqr_vectors.py --update  # refresh it, then re-run the tests
+```
+
+Each block in the file is one seed in all three forms (`seeds`, `standard`,
+`compact`), and the header records the revision it came from. `test_seedqr.c`
+reads the file, so the test data has a single source that can be diffed against
+upstream at any time; only the check script needs network access.
 
 ### `descriptor/`
 

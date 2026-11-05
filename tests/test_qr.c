@@ -250,12 +250,27 @@ static void test_decode_rejects_small_capacity(void) {
     qr_grid_free(&g);
 }
 
+/* Compact payloads from SeedSigner's published test vectors that contain the
+ * bytes QR readers commonly stop at or split on: a NUL (vector 2) and a CR LF
+ * pair (vector 9).  Both have to survive our own encode/decode untouched. */
+static void test_compact_problem_bytes_roundtrip(void) {
+    static const uint8_t v2[32] = {0x0e, 0x59, 0xdd, 0xe2, 0x76, 0x00, 0x93, 0x17, 0xf1, 0x27, 0x5f,
+                                   0x13, 0x89, 0x88, 0x80, 0x78, 0xc9, 0x93, 0x68, 0xd1, 0xe8, 0x24,
+                                   0x89, 0xb5, 0xf6, 0x29, 0x53, 0x1f, 0xc5, 0xb6, 0xa5, 0x6e};
+    roundtrip(v2, sizeof(v2), QR_MODE_BYTE, 25);
+
+    static const uint8_t v9[16] = {0xf5, 0x5c, 0xf5, 0x87, 0xf2, 0x54, 0x3d, 0x01,
+                                   0x09, 0x0d, 0x0a, 0xe7, 0x10, 0xbd, 0x3b, 0x6d};
+    roundtrip(v9, sizeof(v9), QR_MODE_BYTE, 21);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_compact_12);
     RUN_TEST(test_compact_24);
     RUN_TEST(test_standard_12);
     RUN_TEST(test_standard_24);
+    RUN_TEST(test_compact_problem_bytes_roundtrip);
     RUN_TEST(test_seedqr_forms_roundtrip);
     RUN_TEST(test_rejects_oversized_frame);
     RUN_TEST(test_rejects_empty_payload);
