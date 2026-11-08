@@ -15,6 +15,7 @@
 #include "util/utils.h"
 
 #include <emscripten/emscripten.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -24,10 +25,18 @@ const char* hal_get_random_source(void) { return "WebCrypto getRandomValues"; }
 void hal_get_random(uint8_t* buf, size_t len) {
     ASSERT_OR_DIE(buf && len > 0, "hal_get_random: invalid buffer");
 
-    // crypto.getRandomValues caps a single call at 65536 bytes
+    // crypto.getRandomValues caps a single call at 65536 bytes. It refuses a
+    // view onto the wasm heap because a threaded build backs it with a
+    // SharedArrayBuffer, so fill a scratch array and copy it in.
     while (len > 0) {
         size_t n = len > 65536 ? 65536 : len;
-        EM_ASM({ crypto.getRandomValues(new Uint8Array(HEAPU8.buffer, $0, $1)); }, buf, n);
+        EM_ASM(
+            {
+                const tmp = new Uint8Array($1);
+                crypto.getRandomValues(tmp);
+                HEAPU8.set(tmp, $0);
+            },
+            buf, n);
         buf += n;
         len -= n;
     }
@@ -501,5 +510,42 @@ hal_file_image_status_t hal_file_image_poll(hal_camera_frame_t* out) {
 /* -- Touch / pointer input ------------------------------------------- */
 bool hal_touch_available(void) {
     // The SDL backend always registers a mouse pointer
+    return true;
+}
+
+/* -- Background work -------------------------------------------------- */
+typedef struct {
+    void (*fn)(void*);
+    void* arg;
+} work_t;
+
+static void* work_trampoline(void* p) {
+    work_t w = *(work_t*)p;
+    free(p);
+    w.fn(w.arg);
+    return NULL;
+}
+
+bool hal_work_start(void (*fn)(void*), void* arg) {
+    if (!fn) return false;
+
+    work_t* w = malloc(sizeof(*w));
+    if (!w) return false;
+    w->fn  = fn;
+    w->arg = arg;
+
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        free(w);
+        return false;
+    }
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t tid;
+    const int rc = pthread_create(&tid, &attr, work_trampoline, w);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        free(w);
+        return false;
+    }
     return true;
 }

@@ -214,6 +214,20 @@ hal_file_image_status_t hal_file_image_poll(hal_camera_frame_t* out);
  */
 bool hal_touch_available(void);
 
+/**
+ * @brief Run a function once, off the UI task.
+ *
+ * Used for work that takes long enough to freeze the screen (deriving keys).
+ * The function must not touch LVGL or the display; it may only write into the
+ * memory behind @p arg, which the caller keeps alive until it returns.
+ *
+ * @param fn  Work to run (must not be NULL).
+ * @param arg Passed to @p fn as-is.
+ * @return false when the platform cannot run work in the background (the
+ *         browser build), in which case the caller must run @p fn itself.
+ */
+bool hal_work_start(void (*fn)(void*), void* arg);
+
 #ifdef __cplusplus
 }
 #endif

@@ -50,6 +50,7 @@ set(SHARED_APP_SOURCES
     "${SHARED_MAIN_DIR}/crypto/mnemonic.c"
     "${SHARED_MAIN_DIR}/crypto/touch.c"
     "${SHARED_MAIN_DIR}/crypto/dice.c"
+    "${SHARED_MAIN_DIR}/crypto/keycheck.c"
     "${SHARED_MAIN_DIR}/crypto/coin.c"
     "${SHARED_MAIN_DIR}/crypto/secure_stack.c"
     "${SHARED_MAIN_DIR}/crypto/bip39_wordlist.c"

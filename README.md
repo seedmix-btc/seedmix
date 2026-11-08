@@ -50,6 +50,18 @@ On first run the script downloads the Emscripten toolchain (~500 MB) into
 `external/emsdk` and installs version 6.0.9.  Set `EMSDK=/path/to/emsdk` to
 reuse an SDK you've already installed.
 
+The page is built with Emscripten's pthreads so key derivation can run off the
+main thread. That needs `SharedArrayBuffer`, which browsers only expose to a
+cross-origin isolated page, so serve it with the bundled script rather than a
+plain static server:
+
+```bash
+./scripts/serve_web.py 8000 build_web   # sends COOP/COEP headers
+```
+
+A page served without those headers fails to start; `./scripts/build_web.sh
+serve` uses the same script.
+
 Camera access requires a secure context (https:// or http://localhost).
 
 ## ESP32 Deployment

@@ -7,6 +7,8 @@
  * official esp_camera driver, which talks SCCB over the shared I2C bus.
  */
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "hal.h"
 #include "sdkconfig.h"
 #include "touchscreen.h"
@@ -16,6 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_log.h"
+#include "esp_timer.h"
+
 #if CONFIG_SEEDMIX_TRNG_SOURCE_HARDWARE
 #include "esp_random.h"
 #endif
@@ -23,7 +28,6 @@
 #if CONFIG_SEEDMIX_CAMERA_ENABLE
 #include "driver/ledc.h"
 #include "esp_camera.h"
-#include "esp_log.h"
 #endif
 
 /* -- Random ----------------------------------------------------------- */
@@ -485,3 +489,58 @@ hal_file_image_status_t hal_file_image_poll(hal_camera_frame_t* out) {
 
 /* -- Touch / pointer input ------------------------------------------- */
 bool hal_touch_available(void) { return touchscreen_is_present(); }
+
+/* -- Background work -------------------------------------------------- */
+typedef struct {
+    void (*fn)(void*);
+    void* arg;
+} work_t;
+
+static const char* TAG_WORK = "work";
+
+/* The derivation needs about 13 KiB of stack: libwally's PBKDF2-SHA512 spills
+ * heavily on Xtensa, and with 20 KiB available the high-water mark still left
+ * 1848 words free. The stack is static so creating the task cannot fail - a
+ * failed xTaskCreate used to fall back to running the work on the UI task,
+ * which freezes the screen (spinner included) for the whole derivation.
+ * The depth is in StackType_t words, as in vanilla FreeRTOS. */
+#define WORK_STACK_WORDS 5120 /* 20 KiB */
+static StaticTask_t s_work_tcb;
+static StackType_t  s_work_stack[WORK_STACK_WORDS];
+
+static void work_task(void* p) {
+    work_t        w       = *(work_t*)p;
+    const int64_t started = esp_timer_get_time();
+    free(p);
+    w.fn(w.arg);
+    ESP_LOGI(TAG_WORK, "background work finished in %u ms",
+             (unsigned)((esp_timer_get_time() - started) / 1000));
+    vTaskDelete(NULL);
+}
+
+bool hal_work_start(void (*fn)(void*), void* arg) {
+    if (!fn) return false;
+
+    work_t* w = malloc(sizeof(*w));
+    if (!w) return false;
+    w->fn  = fn;
+    w->arg = arg;
+
+    /* The UI task is pinned to core 0, so the derivation goes to the other core
+     * with its own full share of the CPU: the screen keeps repainting (spinner
+     * included) and the derivation is not slowed down by sharing. */
+#if defined(CONFIG_FREERTOS_UNICORE)
+    const BaseType_t core = 0;
+#else
+    const BaseType_t core = 1;
+#endif
+    if (!xTaskCreateStaticPinnedToCore(work_task, "seedmix_work", WORK_STACK_WORDS, w,
+                                       tskIDLE_PRIORITY + 1, s_work_stack, &s_work_tcb, core)) {
+        ESP_LOGE(TAG_WORK, "the background task is still running - the work will block the UI");
+        free(w);
+        return false;
+    }
+
+    ESP_LOGI(TAG_WORK, "background task started");
+    return true;
+}

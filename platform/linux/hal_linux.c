@@ -23,6 +23,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/videodev2.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -789,4 +790,41 @@ bool hal_touch_available(void) {
     // The SDL backend always registers a mouse pointer.
     return true;
 #endif
+}
+
+/* -- Background work -------------------------------------------------- */
+typedef struct {
+    void (*fn)(void*);
+    void* arg;
+} work_t;
+
+static void* work_trampoline(void* p) {
+    work_t w = *(work_t*)p;
+    free(p);
+    w.fn(w.arg);
+    return NULL;
+}
+
+bool hal_work_start(void (*fn)(void*), void* arg) {
+    if (!fn) return false;
+
+    work_t* w = malloc(sizeof(*w));
+    if (!w) return false;
+    w->fn  = fn;
+    w->arg = arg;
+
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        free(w);
+        return false;
+    }
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t tid;
+    const int rc = pthread_create(&tid, &attr, work_trampoline, w);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        free(w);
+        return false;
+    }
+    return true;
 }

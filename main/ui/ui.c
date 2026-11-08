@@ -307,6 +307,18 @@ lv_obj_t* ui_add_btn(lv_obj_t* parent, const char* text, ui_cb_t cb, ui_btn_size
     return b;
 }
 
+/* One action in a footer row. Every action on the row uses this, so the row
+ * reads as a set: same height, same width, same (slightly smaller) font than a
+ * standalone button, which is what lets "Descriptor" fit its share. */
+static lv_obj_t* add_footer_btn(lv_obj_t* parent, const char* text, ui_cb_t cb, lv_align_t align,
+                                lv_coord_t x_ofs) {
+    lv_obj_t* b = ui_add_btn(parent, text, cb, UI_BTN_SIZE_MED, align, x_ofs, -10);
+    lv_obj_set_width(b, ui_scale(148));
+    lv_obj_t* l = lv_obj_get_child(b, 0);
+    if (l) lv_obj_set_style_text_font(l, ui_font(20), 0);
+    return b;
+}
+
 lv_obj_t* ui_add_btn_evt(lv_obj_t* parent, const char* text, lv_event_cb_t evt_cb, void* user_data,
                          ui_btn_size_t size, lv_align_t align, lv_coord_t x_ofs, lv_coord_t y_ofs) {
     lv_obj_t* b = add_btn_impl(parent, text, size, align, x_ofs, y_ofs);
@@ -1798,7 +1810,9 @@ void ui_show_seedqr_help(ui_cb_t on_close) {
     ui_swap_screen(s);
 }
 
-void ui_show_seedqr(const uint8_t* cells, uint32_t size, const char* caption, ui_cb_t on_done) {
+void ui_show_qr(const char* title, const uint8_t* cells, uint32_t size, const char* caption,
+                const char* warning, ui_cb_t on_done) {
+    ASSERT_OR_DIE(title, "null title");
     ASSERT_OR_DIE(cells, "null cells");
     ASSERT_OR_DIE(on_done, "null on_done");
 
@@ -1807,26 +1821,55 @@ void ui_show_seedqr(const uint8_t* cells, uint32_t size, const char* caption, ui
     // Title on the right so the QR can use the full screen height.
     // Match the Done button's right edge (-30) so the column lines up.
     lv_obj_t* t = lv_label_create(s);
-    lv_label_set_text(t, "SeedQR");
+    lv_label_set_text(t, title);
     lv_obj_set_style_text_color(t, lv_color_white(), 0);
     lv_obj_set_style_text_font(t, ui_font(28), 0);
     lv_obj_align(t, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(15));
 
     // Which form the code holds, so the code on screen can be named when the
     // other wallet asks.
+    lv_obj_t* cap = NULL;
     if (caption && caption[0]) {
-        lv_obj_t* cap = lv_label_create(s);
+        cap = lv_label_create(s);
         lv_label_set_text(cap, caption);
         lv_obj_set_style_text_color(cap, lv_color_hex(0x888888), 0);
         lv_obj_set_style_text_font(cap, ui_font(16), 0);
+        lv_obj_set_style_text_align(cap, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(cap, ui_scale(150));
+        lv_label_set_long_mode(cap, LV_LABEL_LONG_WRAP);
         lv_obj_align(cap, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(48));
+    }
+
+    // A private key wants saying out loud, on the screen that shows it.
+    if (warning && warning[0]) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, warning);
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(14), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(w, ui_scale(150));
+        lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+        if (cap) {
+            lv_obj_update_layout(cap);
+            lv_obj_align_to(w, cap, LV_ALIGN_OUT_BOTTOM_RIGHT, 0, ui_scale(8));
+        } else {
+            lv_obj_align(w, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(48));
+        }
     }
 
     // White quiet-zone border (4 modules), then the data modules
     uint32_t border = 4;
     uint32_t total  = size + 2 * border;
-    uint32_t scale  = (uint32_t)ui_scale(300) / total; // fit screen height
-    if (scale < 4) scale = 4;
+    // Fit the screen, and leave the right-hand column for the title and caption:
+    // a dense code (a key is ~53 modules, a descriptor ~53) has to take a
+    // smaller module size than a SeedQR, so there is no floor to clamp to.
+    uint32_t budget = (uint32_t)ui_scale(300);
+    if (budget > (uint32_t)LV_HOR_RES) budget = (uint32_t)LV_HOR_RES;
+    const uint32_t text_col = (uint32_t)ui_scale(200);
+    if (LV_HOR_RES > (int32_t)text_col && budget > (uint32_t)LV_HOR_RES - text_col)
+        budget = (uint32_t)LV_HOR_RES - text_col;
+    uint32_t scale = budget / total;
+    if (scale == 0) scale = 1;
     uint32_t px = scale * total;
 
     // Build one RGB565 buffer and show it as a single image
@@ -2050,8 +2093,205 @@ void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on
     ui_show_text_screen(title, body, NULL, "Continue", on_continue, "Cancel", on_cancel);
 }
 
+/* -- Wallet keys ------------------------------------------------------ */
+static ui_uint_cb_t keycheck_tab_handler = NULL;
+static ui_uint_cb_t keycheck_row_handler = NULL;
+
+static void keycheck_tab_cb(lv_event_t* e) {
+    if (!keycheck_tab_handler) return;
+    keycheck_tab_handler((uint8_t)(uintptr_t)lv_event_get_user_data(e));
+}
+
+static void keycheck_row_cb(lv_event_t* e) {
+    if (!keycheck_row_handler) return;
+    keycheck_row_handler((uint8_t)(uintptr_t)lv_event_get_user_data(e));
+}
+
+static lv_obj_t* keycheck_plain_box(lv_obj_t* parent, lv_coord_t w) {
+    lv_obj_t* o = lv_obj_create(parent);
+    lv_obj_set_width(o, w);
+    lv_obj_set_height(o, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    return o;
+}
+
+/* One labelled value with a QR button on its right. The value wraps, so a
+ * 111-character xprv takes two lines and an address takes one. */
+static void keycheck_add_row(lv_obj_t* cont, const ui_keycheck_row_t* row, lv_coord_t width,
+                             size_t index) {
+    const lv_coord_t qr_w  = ui_scale(60);
+    const lv_coord_t qr_h  = ui_scale(34);
+    const lv_coord_t gap   = ui_scale(8);
+    const lv_coord_t pad   = ui_scale(4);
+    const lv_coord_t col_w = width - qr_w - gap - 2 * pad;
+
+    lv_obj_t* box = lv_obj_create(cont);
+    lv_obj_set_width(box, width);
+    lv_obj_set_height(box, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_radius(box, ui_scale(4), 0);
+    lv_obj_set_style_pad_all(box, pad, 0);
+    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(box, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t* col = keycheck_plain_box(box, col_w);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+
+    lv_obj_t* label = lv_label_create(col);
+    lv_label_set_text(label, row->label);
+    lv_obj_set_style_text_color(label,
+                                row->secret ? lv_color_hex(0xFF6B6B) : lv_color_hex(0x9A9A9A), 0);
+    lv_obj_set_style_text_font(label, ui_font(12), 0);
+
+    lv_obj_t* value = lv_label_create(col);
+    lv_label_set_text(value, row->value);
+    lv_obj_set_style_text_color(value, row->secret ? lv_color_hex(0xFFD0D0) : lv_color_white(), 0);
+    lv_obj_set_style_text_font(value, ui_font(12), 0);
+    lv_obj_set_width(value, col_w);
+    lv_label_set_long_mode(value, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t* qr = lv_button_create(box);
+    lv_obj_set_size(qr, qr_w, qr_h);
+    lv_obj_set_style_bg_color(qr, lv_color_hex(UI_COLOR_MIX_GREEN), 0);
+    lv_obj_t* ql = lv_label_create(qr);
+    lv_label_set_text(ql, "QR");
+    lv_obj_set_style_text_color(ql, lv_color_white(), 0);
+    lv_obj_set_style_text_font(ql, ui_font(14), 0);
+    lv_obj_center(ql);
+    lv_obj_add_event_cb(qr, keycheck_row_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)index);
+}
+
+/* One policy at a time behind a row of tabs. A policy whose key material is
+ * still being derived shows a spinner, so a slow PBKDF2 on a small MCU never
+ * leaves the screen looking hung. */
+void ui_show_keycheck(const ui_keycheck_view_t* view, ui_uint_cb_t on_tab, ui_uint_cb_t on_row_qr,
+                      ui_cb_t on_done) {
+    ASSERT_OR_DIE(view, "null view");
+    ASSERT_OR_DIE(on_tab, "null on_tab");
+    ASSERT_OR_DIE(on_done, "null on_done");
+    ASSERT_OR_DIE(view->tab_count > 0 && view->tab_count <= UI_KEYCHECK_TABS_MAX, "bad tab count");
+    ASSERT_OR_DIE(view->tab < view->tab_count, "selected tab out of range");
+    ASSERT_OR_DIE(view->busy || view->error || view->row_count > 0, "nothing to show");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Wallet Keys");
+
+    char head[72];
+    if (view->fingerprint) {
+        int res = snprintf(head, sizeof(head), "Fingerprint  %s  (%s passphrase)",
+                           view->fingerprint, view->has_passphrase ? "with" : "no");
+        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(head), "fingerprint header too long");
+    } else {
+        snprintf(head, sizeof(head), "Fingerprint  ...");
+    }
+
+    const lv_font_t* head_font = ui_font(14);
+    lv_obj_t*        fp        = lv_label_create(s);
+    lv_label_set_text(fp, head);
+    lv_obj_set_style_text_color(
+        fp, view->fingerprint ? lv_color_hex(UI_COLOR_SEED_GREEN) : lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(fp, head_font, 0);
+    lv_obj_align(fp, LV_ALIGN_TOP_MID, 0, ui_scale(50));
+
+    keycheck_tab_handler = on_tab;
+    lv_obj_t* row        = lv_obj_create(s);
+    lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, ui_scale(6), 0);
+
+    const lv_coord_t tab_w = ui_scale(96);
+    const lv_coord_t tab_h = ui_scale(34);
+    for (size_t i = 0; i < view->tab_count; i++) {
+        lv_obj_t* b = lv_button_create(row);
+        lv_obj_set_size(b, tab_w, tab_h);
+        lv_obj_set_style_bg_color(b, lv_color_hex(i == view->tab ? UI_COLOR_MIX_GREEN : 0x222222),
+                                  0);
+        lv_obj_t* l = lv_label_create(b);
+        lv_label_set_text(l, view->tabs[i]);
+        lv_obj_set_style_text_color(l, lv_color_white(), 0);
+        lv_obj_set_style_text_font(l, ui_font(18), 0);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, keycheck_tab_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)i);
+    }
+
+    /* Place the row under the fingerprint and size the body from it, so the
+     * screen does not depend on guessed font metrics. */
+    lv_obj_update_layout(row);
+    lv_obj_align_to(row, fp, LV_ALIGN_OUT_BOTTOM_MID, 0, ui_scale(8));
+    lv_obj_update_layout(row);
+
+    const lv_coord_t y      = lv_obj_get_y(row) + lv_obj_get_height(row) + ui_scale(8);
+    lv_coord_t       cont_h = LV_VER_RES - y - ui_scale(56);
+    if (cont_h < ui_scale(40)) cont_h = ui_scale(40);
+
+    if (view->busy) {
+        lv_obj_t* sp = lv_spinner_create(s);
+        lv_obj_set_size(sp, ui_scale(56), ui_scale(56));
+        lv_obj_align(sp, LV_ALIGN_TOP_MID, 0, y + ui_scale(6));
+        lv_spinner_set_anim_params(sp, 1000, 60);
+
+        lv_obj_t* lbl = lv_label_create(s);
+        lv_label_set_text(lbl, "Deriving keys...");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+        lv_obj_align_to(lbl, sp, LV_ALIGN_OUT_BOTTOM_MID, 0, ui_scale(6));
+    } else if (view->error) {
+        lv_obj_t* lbl = lv_label_create(s);
+        lv_label_set_text(lbl, view->error);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(lbl, ui_font(14), 0);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(lbl, ui_scale(420));
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, y + ui_scale(8));
+    } else {
+        bool       use_arrows = !hal_touch_available();
+        lv_coord_t body_w     = use_arrows ? ui_scale(400) : ui_scale(440);
+
+        lv_obj_t* cont = lv_obj_create(s);
+        lv_obj_set_size(cont, body_w, cont_h);
+        if (use_arrows)
+            lv_obj_align(cont, LV_ALIGN_TOP_LEFT, ui_scale(4), y);
+        else
+            lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, y);
+        lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+        lv_obj_set_style_border_width(cont, 0, 0);
+        lv_obj_set_style_pad_all(cont, ui_scale(4), 0);
+        lv_obj_set_style_pad_row(cont, ui_scale(4), 0);
+        lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+        lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+        lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+        const lv_coord_t row_w = body_w - 2 * ui_scale(4) - ui_scale(8); /* minus pad/scrollbar */
+
+        keycheck_row_handler = on_row_qr;
+        for (size_t i = 0; i < view->row_count; i++)
+            keycheck_add_row(cont, &view->rows[i], row_w, i);
+
+        if (use_arrows) {
+            lv_obj_t* arrows = ui_add_scroll_arrows(s, cont, ui_scale(24));
+            lv_obj_align(arrows, LV_ALIGN_TOP_RIGHT, -ui_scale(4), y);
+        }
+    }
+
+    /* The row buttons are the exports now, so the footer is just the way out. */
+    add_footer_btn(s, "Done", on_done, LV_ALIGN_BOTTOM_RIGHT, -10);
+
+    ui_swap_screen(s);
+}
+
 void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export,
-                      ui_cb_t on_help, const mnemonic_bits_t* bits) {
+                      ui_cb_t on_verify, ui_cb_t on_help, const mnemonic_bits_t* bits) {
     ASSERT_OR_DIE(words, "null words");
     ASSERT_OR_DIE(on_ok, "null on_ok");
 
@@ -2143,8 +2383,13 @@ void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui
         }
     }
 
-    if (on_export) {
-        ui_add_btn(s, "Show SeedQR", on_export, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    if (on_export && on_verify) {
+        // SeedQR on the left, the keys the words open in the middle, done right.
+        add_footer_btn(s, "SeedQR", on_export, LV_ALIGN_BOTTOM_LEFT, 10);
+        add_footer_btn(s, "Keys", on_verify, LV_ALIGN_BOTTOM_MID, 0);
+        add_footer_btn(s, "Ok", on_ok, LV_ALIGN_BOTTOM_RIGHT, -10);
+    } else if (on_export) {
+        ui_add_btn(s, "SeedQR", on_export, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
         ui_add_btn(s, "Ok", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
     } else {
         lv_obj_t* ok = ui_add_btn(s, "Ok", on_ok, UI_BTN_SIZE_MED, LV_ALIGN_CENTER, 0, 0);

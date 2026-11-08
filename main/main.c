@@ -7,6 +7,7 @@
 #include "crypto/coin.h"
 #include "crypto/descriptor.h"
 #include "crypto/dice.h"
+#include "crypto/keycheck.h"
 #include "crypto/mnemonic.h"
 #include "crypto/seedqr.h"
 #include "crypto/touch.h"
@@ -66,6 +67,14 @@ static void on_camera_cancel(void);
 static void on_camera_help(void);
 static void on_camera_help_close(void);
 static void show_final_screen(void);
+static void on_verify_keys(void);
+static void on_keycheck_done(void);
+static void on_keycheck_tab(uint8_t index);
+static void on_row_qr(uint8_t row);
+static void kc_update(void);
+static void kc_refresh(void);
+static void kc_poll_cb(lv_timer_t* t);
+static void kc_finish_job(void);
 static void on_words_help(void);
 static void on_words_help_close(void);
 static void on_scan_qr(void);
@@ -89,8 +98,7 @@ static void on_skip_descriptor(void);
 static void on_descriptor_overview_continue(void);
 static void on_descriptor_overview_cancel(void);
 static void start_tx_scan(void);
-static void on_export_seedqr(void);
-static void on_seedqr_format(uint8_t format);
+static void on_seedqr_export(void);
 static void on_export_done(void);
 static void on_dice_rolls(void);
 static void on_coin_flips(void);
@@ -1123,63 +1131,6 @@ static bool on_tx_payload(qr_source_t source, const uint8_t* payload, size_t ple
     return true;
 }
 
-/* Which SeedQR to export: Compact or Standard */
-enum { SEEDQR_FORMAT_COMPACT = 0, SEEDQR_FORMAT_STANDARD = 1 };
-
-static void on_export_seedqr(void) {
-    if (!final_mnemonic) {
-        ui_go_main();
-        return;
-    }
-
-    static const char* const formats[] = {"Compact SeedQR", "Standard SeedQR"};
-    ui_show_choice("Export SeedQR",
-                   "Compact encodes the raw entropy bytes, not the mnemonic words. Standard "
-                   "encodes four digits for each word.",
-                   formats, sizeof(formats) / sizeof(formats[0]), on_seedqr_format,
-                   show_final_screen);
-}
-
-static void on_seedqr_format(uint8_t format) {
-    if (!final_mnemonic) {
-        ui_go_main();
-        return;
-    }
-
-    const char* caption = "Compact";
-    if (format == SEEDQR_FORMAT_STANDARD) {
-        // The digits are the seed written as word numbers, so wipe them too.
-        char   digits[SEEDQR_STANDARD_24_DIGITS + 1];
-        size_t n = seedqr_standard_encode(final_mnemonic, digits, sizeof(digits));
-        if (n != SEEDQR_STANDARD_12_DIGITS && n != SEEDQR_STANDARD_24_DIGITS) {
-            secure_memzero(digits, sizeof(digits));
-            FATAL("SeedQR encode failed");
-        }
-        const bool ok = qr_encode((const uint8_t*)digits, n, QR_MODE_NUMERIC, &exported_qr);
-        secure_memzero(digits, sizeof(digits));
-        if (!ok) FATAL("SeedQR encode failed");
-        caption = "Standard";
-    } else {
-        uint8_t entropy[32];
-        size_t  n = seedqr_compact_encode(final_mnemonic, entropy, sizeof(entropy));
-        if (n != 16 && n != 32) {
-            secure_memzero(entropy, sizeof(entropy));
-            FATAL("SeedQR encode failed");
-        }
-        const bool ok = qr_encode(entropy, n, QR_MODE_BYTE, &exported_qr);
-        secure_memzero(entropy, sizeof(entropy));
-        if (!ok) FATAL("SeedQR encode failed");
-    }
-
-    ui_show_seedqr(exported_qr.cells, exported_qr.size, caption, on_export_done);
-}
-
-static void on_export_done(void) {
-    ui_seedqr_cleanup();
-    qr_grid_free(&exported_qr);
-    show_final_screen();
-}
-
 /* -- The bits behind the words ---------------------------------------- */
 /* The final screen, the bits screen and the state screen all show where the
  * words came from, so the bundle is built once from the live mnemonic. */
@@ -1227,7 +1178,359 @@ static void show_final_screen(void) {
     ASSERT_OR_DIE(final_mnemonic, "mnemonic from entropy failed");
 
     ui_show_mnemonic(mnemonic_words(final_mnemonic), MNEMONIC_TYPE_FINAL, on_finish_done,
-                     on_export_seedqr, on_words_help, current_bits());
+                     on_seedqr_export, on_verify_keys, on_words_help, current_bits());
+}
+
+/* -- Wallet keys ------------------------------------------------------ */
+/* The master key costs a PBKDF2 stretch that takes seconds on a small MCU, so
+ * it is derived on a background task while the screen shows a spinner. The
+ * four policies are cheap next to it and are derived on demand: only the tab
+ * being looked at, and only the first time it is opened. */
+#define KC_TAB_COUNT KEYCHECK_POLICY_COUNT
+
+/* Keep the spinner up for at least this long. The derivation takes seconds on a
+ * small MCU and milliseconds on a desktop or in a browser. */
+#define KC_MIN_SPINNER_MS 1000
+
+static keycheck_t* kc_session;       /* master material, kept while the words last */
+static char*       kc_session_words; /* which mnemonic kc_session belongs to */
+static size_t      kc_tab;           /* tab on screen */
+static bool        kc_live;          /* the keys screen is the visible one */
+static bool        kc_master_failed; /* the PBKDF2 step failed for these words */
+static bool        kc_policy_failed[KC_TAB_COUNT];
+static lv_timer_t* kc_timer;     /* polls the background job */
+static uint32_t    kc_job_start; /* lv_tick_get() when the job was started */
+
+/* The one running job. The worker owns the words string and the result until
+ * kc_finish_job() takes them over. */
+static char*         kc_job_words;
+static keycheck_t*   kc_job_result;
+static bool          kc_job_ok;
+static bool          kc_discard; /* result belongs to a mnemonic no longer shown */
+static volatile bool kc_job_done;
+
+static char* words_dup(const char* words) {
+    const size_t n    = strlen(words) + 1;
+    char*        copy = malloc(n);
+    if (copy) memcpy(copy, words, n);
+    return copy;
+}
+
+static void words_free(char** words) {
+    if (!*words) return;
+    secure_memzero(*words, strlen(*words));
+    free(*words);
+    *words = NULL;
+}
+
+static bool kc_session_matches(void) {
+    if (!kc_session || !kc_session_words || !final_mnemonic) return false;
+    return strcmp(kc_session_words, mnemonic_words(final_mnemonic)) == 0;
+}
+
+static void kc_session_free(void) {
+    keycheck_free(kc_session);
+    kc_session = NULL;
+    words_free(&kc_session_words);
+}
+
+/* Runs on the background task: no LVGL here, only the job slots. */
+static void kc_master_worker(void* arg) {
+    (void)arg;
+    kc_job_result = keycheck_begin_words(kc_job_words, NULL, KEYCHECK_MAINNET);
+    kc_job_ok     = kc_job_result != NULL;
+    __sync_synchronize();
+    kc_job_done = true;
+}
+
+static void kc_start_master(void) {
+    ASSERT_OR_DIE(final_mnemonic, "no mnemonic to derive from");
+    ASSERT_OR_DIE(kc_timer == NULL, "a key derivation is already running");
+
+    kc_job_words = words_dup(mnemonic_words(final_mnemonic));
+    ASSERT_OR_DIE(kc_job_words, "out of memory");
+    kc_job_result = NULL;
+    kc_job_ok     = false;
+    kc_job_done   = false;
+    kc_job_start  = lv_tick_get();
+
+    if (hal_work_start(kc_master_worker, NULL)) {
+        kc_timer = lv_timer_create(kc_poll_cb, 50, NULL);
+        ASSERT_OR_DIE(kc_timer, "could not create the key derivation timer");
+        return;
+    }
+
+    /* No background task on this platform: paint the spinner, then do the work
+     * here, and leave the spinner up for its minimum time. */
+    kc_refresh();
+    lv_refr_now(NULL);
+    kc_master_worker(NULL);
+    uint32_t elapsed = lv_tick_elaps(kc_job_start);
+    if (elapsed < KC_MIN_SPINNER_MS) ui_delay_ms(KC_MIN_SPINNER_MS - elapsed);
+    kc_finish_job();
+}
+
+/* Take over a finished job. State only: the caller refreshes the screen. */
+static void kc_finish_job(void) {
+    __sync_synchronize();
+    kc_job_done = false;
+
+    if (kc_timer) {
+        lv_timer_delete(kc_timer);
+        kc_timer = NULL;
+    }
+
+    if (kc_job_ok && !kc_discard) {
+        kc_session_free();
+        kc_session       = kc_job_result;
+        kc_session_words = kc_job_words;
+        kc_job_words     = NULL;
+        kc_master_failed = false;
+        memset(kc_policy_failed, 0, sizeof(kc_policy_failed));
+    } else {
+        keycheck_free(kc_job_result);
+        if (!kc_discard) kc_master_failed = true;
+    }
+    kc_job_result = NULL;
+    kc_discard    = false;
+    words_free(&kc_job_words);
+
+    if (!kc_live && kc_session && !kc_session_matches()) kc_session_free();
+}
+
+/* -- The values the keys screen shows ---------------------------------- */
+enum {
+    KC_ROW_XPUB = 0,
+    KC_ROW_XPRIV,
+    KC_ROW_DESCRIPTOR,
+    KC_ROW_RECEIVE,
+    KC_ROW_CHANGE,
+    KC_ROW_COUNT,
+};
+
+static const char* const kc_row_labels[KC_ROW_COUNT] = {"xpub", "xpriv", "descriptor", "receive",
+                                                        "change"};
+
+/* The selected tab's value for one row, into @p out. */
+static bool kc_row_text(size_t row, char* out, size_t cap) {
+    if (!kc_session_matches() || !keycheck_policy_ready(kc_session, kc_tab)) return false;
+
+    const keycheck_policy_t* p   = keycheck_policy(kc_session, kc_tab);
+    const char*              src = NULL;
+    switch (row) {
+    case KC_ROW_XPUB:
+        src = p->account_xpub;
+        break;
+    case KC_ROW_XPRIV:
+        src = p->account_xprv;
+        break;
+    case KC_ROW_DESCRIPTOR:
+        return keycheck_policy_descriptor(kc_session, kc_tab, out, cap) > 0;
+    case KC_ROW_RECEIVE:
+        src = p->receive;
+        break;
+    case KC_ROW_CHANGE:
+        src = p->change;
+        break;
+    default:
+        return false;
+    }
+
+    const size_t n = strlen(src);
+    if (n == 0 || n >= cap) return false;
+    memcpy(out, src, n + 1);
+    return true;
+}
+
+static void kc_refresh(void) {
+    if (!kc_live) return;
+
+    ui_keycheck_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.fingerprint    = kc_session_matches() ? keycheck_fingerprint(kc_session) : NULL;
+    view.has_passphrase = false;
+    view.tab_count      = KC_TAB_COUNT;
+    view.tab            = kc_tab;
+    for (size_t i = 0; i < KC_TAB_COUNT; i++) view.tabs[i] = keycheck_policy_tab(i);
+
+    /* The tab's values, one row per exportable part. Buffers are static so the
+     * strings live as long as the screen needs them; ui_show_keycheck() copies. */
+    static char              values[KC_ROW_COUNT][192];
+    static ui_keycheck_row_t rows[KC_ROW_COUNT];
+    size_t                   nrows = 0;
+
+    if (kc_session && keycheck_policy_ready(kc_session, kc_tab)) {
+        for (size_t i = 0; i < KC_ROW_COUNT; i++) {
+            if (!kc_row_text(i, values[i], sizeof(values[i]))) continue;
+            rows[nrows].label  = kc_row_labels[i];
+            rows[nrows].value  = values[i];
+            rows[nrows].secret = (i == KC_ROW_XPRIV);
+            nrows++;
+        }
+    }
+
+    if (kc_timer) {
+        view.busy = true; /* a job is running */
+    } else if (kc_master_failed) {
+        view.error = "Could not derive the wallet keys from these words.";
+    } else if (kc_policy_failed[kc_tab]) {
+        view.error = "Could not derive the keys for this tab.";
+    } else if (nrows == 0) {
+        view.busy = true; /* about to be derived */
+    }
+    view.rows      = rows;
+    view.row_count = nrows;
+
+    ui_show_keycheck(&view, on_keycheck_tab, on_row_qr, on_keycheck_done);
+}
+
+/* Bring the screen up to date, deriving whatever it needs that is missing. */
+static void kc_update(void) {
+    if (!kc_live) return;
+
+    if (!kc_timer && !kc_session && !kc_master_failed) kc_start_master();
+
+    if (!kc_timer && kc_session_matches() && !keycheck_policy_ready(kc_session, kc_tab) &&
+        !kc_policy_failed[kc_tab]) {
+        if (!keycheck_policy_derive(kc_session, kc_tab)) kc_policy_failed[kc_tab] = true;
+    }
+
+    kc_refresh();
+}
+
+static void on_keycheck_tab(uint8_t index) {
+    if (index >= KC_TAB_COUNT) return;
+    kc_tab = index;
+    kc_update();
+}
+
+static void on_verify_keys(void) {
+    if (!final_mnemonic) {
+        ui_go_main();
+        return;
+    }
+
+    kc_live          = true;
+    kc_master_failed = false;
+
+    /* A job left running from an earlier visit is still useful when it is for
+     * these same words; otherwise its result is not what the screen wants. */
+    if (kc_timer && kc_job_words && strcmp(kc_job_words, mnemonic_words(final_mnemonic)) != 0)
+        kc_discard = true;
+
+    if (!kc_timer && kc_session && !kc_session_matches()) kc_session_free();
+
+    kc_update();
+}
+
+static void on_keycheck_done(void) {
+    kc_live = false;
+    show_final_screen();
+}
+
+/* -- Export ----------------------------------------------------------- */
+/* The final screen's SeedQR button and the keys screen's two export buttons
+ * both end on the same full-screen QR. SeedQR needs only the words; a key or
+ * descriptor export uses the account key the keys screen has already derived
+ * for the selected tab. */
+enum { SEEDQR_FORMAT_COMPACT = 0, SEEDQR_FORMAT_STANDARD = 1 };
+
+/* Where the QR screen goes when it is done: the keys screen it was opened
+ * from, or the final screen for a SeedQR. */
+static ui_cb_t export_return;
+
+static void on_seedqr_export(void);
+static void on_seedqr_format(uint8_t format);
+
+static void on_seedqr_export(void) {
+    if (!final_mnemonic) {
+        ui_go_main();
+        return;
+    }
+
+    static const char* const formats[] = {"Compact SeedQR", "Standard SeedQR"};
+    ui_show_choice("Export SeedQR",
+                   "Compact encodes the raw entropy bytes, not the mnemonic words. Standard "
+                   "encodes four digits for each word.",
+                   formats, sizeof(formats) / sizeof(formats[0]), on_seedqr_format,
+                   show_final_screen);
+}
+
+static void on_seedqr_format(uint8_t format) {
+    if (!final_mnemonic) {
+        ui_go_main();
+        return;
+    }
+
+    const char* caption = "Compact";
+    if (format == SEEDQR_FORMAT_STANDARD) {
+        // The digits are the seed written as word numbers, so wipe them too.
+        char   digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        size_t n = seedqr_standard_encode(final_mnemonic, digits, sizeof(digits));
+        if (n != SEEDQR_STANDARD_12_DIGITS && n != SEEDQR_STANDARD_24_DIGITS) {
+            secure_memzero(digits, sizeof(digits));
+            FATAL("SeedQR encode failed");
+        }
+        const bool ok = qr_encode((const uint8_t*)digits, n, QR_MODE_NUMERIC, &exported_qr);
+        secure_memzero(digits, sizeof(digits));
+        if (!ok) FATAL("SeedQR encode failed");
+        caption = "Standard";
+    } else {
+        uint8_t entropy[32];
+        size_t  n = seedqr_compact_encode(final_mnemonic, entropy, sizeof(entropy));
+        if (n != 16 && n != 32) {
+            secure_memzero(entropy, sizeof(entropy));
+            FATAL("SeedQR encode failed");
+        }
+        const bool ok = qr_encode(entropy, n, QR_MODE_BYTE, &exported_qr);
+        secure_memzero(entropy, sizeof(entropy));
+        if (!ok) FATAL("SeedQR encode failed");
+    }
+
+    export_return = show_final_screen;
+    ui_show_qr("SeedQR", exported_qr.cells, exported_qr.size, caption, NULL, on_export_done);
+}
+
+/* Show the QR for one row of the keys screen. */
+static void on_row_qr(uint8_t row) {
+    if (row >= KC_ROW_COUNT || !kc_session_matches()) return;
+
+    char text[192];
+    if (!kc_row_text(row, text, sizeof(text))) return;
+
+    const keycheck_policy_t* p = keycheck_policy(kc_session, kc_tab);
+    ASSERT_OR_DIE(p, "no policy for the key export");
+
+    char caption[64];
+    snprintf(caption, sizeof(caption), "%s\n%s", p->label, kc_row_labels[row]);
+
+    /* The private key is the one value that must not travel casually. */
+    const char* warning = (row == KC_ROW_XPRIV) ? "Private key - keep it offline" : NULL;
+
+    const bool ok = qr_encode((const uint8_t*)text, strlen(text), QR_MODE_BYTE, &exported_qr);
+    secure_memzero(text, sizeof(text));
+    if (!ok) FATAL("key export encode failed");
+
+    export_return = kc_refresh;
+    ui_show_qr("Export Key", exported_qr.cells, exported_qr.size, caption, warning, on_export_done);
+}
+
+static void on_export_done(void) {
+    ui_seedqr_cleanup();
+    qr_grid_free(&exported_qr);
+    ui_cb_t next  = export_return;
+    export_return = NULL;
+    if (next) next();
+}
+
+static void kc_poll_cb(lv_timer_t* t) {
+    (void)t;
+    if (!kc_job_done) return;
+    /* Fast hosts finish sooner than the spinner can be seen; the poll keeps
+     * running, so wait out the rest of the minimum here. */
+    if (lv_tick_elaps(kc_job_start) < KC_MIN_SPINNER_MS) return;
+    kc_finish_job();
+    kc_update();
 }
 
 /* -- Dice roll entropy source ---------------------------------------- */
@@ -1630,6 +1933,11 @@ static void on_finish_done(void) {
     }
     secure_memzero(we_entered, sizeof(we_entered));
     final_mnemonic_wipe();
+    /* The keys derived for these words go with them. A derivation still
+     * running is left to finish; its result is thrown away when it does. */
+    kc_live = false;
+    if (kc_timer) kc_discard = true;
+    kc_session_free();
     secure_memzero(current_entropy, sizeof(current_entropy));
     current_entropy_len = 0;
     pending_wipe();

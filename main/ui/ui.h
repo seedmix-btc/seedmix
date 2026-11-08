@@ -51,15 +51,19 @@ void ui_camera_feed_stats(unsigned frames, uint64_t bytes);
 /** @brief Show how the camera's frames become the seed (help screen). */
 void ui_show_camera_help(ui_cb_t on_close);
 /**
- * @brief Show an exported SeedQR full-screen.
+ * @brief Show an exported QR full-screen.
  *
+ * @param title   What the code is ("SeedQR", "Export Key"), shown top-right.
  * @param cells   QR modules, `size` x `size`, 1 = dark.
  * @param size    Modules per side.
- * @param caption Which SeedQR form the code holds ("Compact", "Standard"), shown
- *                under the title; NULL for none.
+ * @param caption Which form the code holds ("Compact", "BIP84 descriptor"),
+ *                shown under the title; NULL for none.
+ * @param warning Optional red line under the caption ("private key").
  * @param on_done Done button.
  */
-void ui_show_seedqr(const uint8_t* cells, uint32_t size, const char* caption, ui_cb_t on_done);
+void ui_show_qr(const char* title, const uint8_t* cells, uint32_t size, const char* caption,
+                const char* warning, ui_cb_t on_done);
+
 void ui_seedqr_cleanup(void);
 void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file,
                           ui_cb_t on_help);
@@ -152,8 +156,52 @@ void ui_coin_set_progress(const uint8_t* bytes, unsigned count, uint32_t filled_
 void        ui_show_enter_words(ui_cb_t on_ok);
 const char* ui_get_entered_words(void);
 
+/**
+ * @brief Show the finished words.
+ *
+ * @param on_export Optional; adds the SeedQR button.
+ * @param on_verify Optional; adds the "Keys" button (see ui_show_keycheck()).
+ */
 void ui_show_mnemonic(const char* words, mnemonic_type_t type, ui_cb_t on_ok, ui_cb_t on_export,
-                      ui_cb_t on_help, const mnemonic_bits_t* bits);
+                      ui_cb_t on_verify, ui_cb_t on_help, const mnemonic_bits_t* bits);
+
+/**
+ * @brief Show the keys a seed opens, so they can be checked against a wallet.
+ *
+ * The policies are tabs; each tab shows a list of labelled values (account
+ * keys, descriptor, first addresses) with a QR button beside each one.
+ */
+#define UI_KEYCHECK_TABS_MAX 4
+
+/** One labelled value, with its own QR button. */
+typedef struct {
+    const char* label;  /**< "xpub", "receive", ... */
+    const char* value;  /**< shown wrapped, and what the QR carries */
+    bool        secret; /**< a private key: called out as such */
+} ui_keycheck_row_t;
+
+typedef struct {
+    const char*              fingerprint;    /**< 8 hex characters, or NULL while unknown. */
+    bool                     has_passphrase; /**< Said out loud: this changes the wallet. */
+    const char*              tabs[UI_KEYCHECK_TABS_MAX]; /**< Tab labels, in order. */
+    size_t                   tab_count;
+    size_t                   tab;   /**< Selected tab (0-based). */
+    const char*              path;  /**< "m/84'/0'/0'", or NULL. */
+    bool                     busy;  /**< Deriving: show a spinner, ignore rows/error. */
+    const char*              error; /**< Shown instead of the rows when set. */
+    const ui_keycheck_row_t* rows;
+    size_t                   row_count;
+} ui_keycheck_view_t;
+
+/**
+ * @param on_tab    Called with the tab index when a tab is pressed.
+ * @param on_row_qr Called with the row index when a row's QR button is pressed.
+ * @param on_done   Done button.
+ *
+ * Every string in @p view is copied, so the caller may free them on return.
+ */
+void ui_show_keycheck(const ui_keycheck_view_t* view, ui_uint_cb_t on_tab, ui_uint_cb_t on_row_qr,
+                      ui_cb_t on_done);
 /**
  * @brief Explain how the words are cut out of the entropy, eleven bits at a time.
  *

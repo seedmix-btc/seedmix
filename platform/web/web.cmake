@@ -30,8 +30,9 @@ set(CONFIG_LV_BUILD_DEMOS    OFF CACHE BOOL "" FORCE)
 # be on BOTH the compile line (LVGL's SDL driver includes <SDL2/SDL.h>) and
 # the link line.  These flags are directory-scoped, so set them before
 # add_subdirectory(lvgl) so the driver sources compile too.
-add_compile_options(-sUSE_SDL=2)
-add_link_options(-sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576 -sASYNCIFY -sEXIT_RUNTIME=0)
+add_compile_options(-sUSE_SDL=2 -pthread)
+add_link_options(-sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576 -sASYNCIFY -sEXIT_RUNTIME=0
+    -pthread -sPTHREAD_POOL_SIZE=2)
 
 add_subdirectory(${LVGL_DIR} ${CMAKE_BINARY_DIR}/lvgl)
 
