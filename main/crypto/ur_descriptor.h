@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,20 @@ extern "C" {
  *         or private key material.
  */
 bool ur_descriptor_decode(const char* ur, size_t ur_len, char** out_descriptor);
+
+/**
+ * @brief Encode descriptor text as the CBOR message of an
+ *        `output-descriptor` UR (BCR-2023-010).
+ *
+ * The keys are written inline, so no key array (map key 2) is emitted.  The
+ * result is what ur_encode() and ur_multipart_encode_part() wrap.
+ *
+ * @param text     Descriptor text, checksum included or not.
+ * @param out_cbor On success, set to a malloc'd buffer (caller frees).
+ * @param out_len  On success, set to the CBOR byte length.
+ * @return true on success; false on invalid arguments or allocation failure.
+ */
+bool ur_descriptor_encode(const char* text, uint8_t** out_cbor, size_t* out_len);
 
 /**
  * @brief Stateful decoder for single-part and animated multi-part descriptor

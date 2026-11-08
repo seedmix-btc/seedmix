@@ -10,6 +10,9 @@
 #include "ur.h"
 #include "fountain.h"
 
+#include "util/utils.h"
+
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -439,6 +442,159 @@ bool ur_encode(const char* type, const uint8_t* cbor, size_t cbor_len, char** ou
 
     *out_ur = ur;
     return true;
+}
+
+/* -- Multipart UR (fountain) encoding ---------------------------------- */
+/* Just enough CBOR to write one part: an array of integers plus a byte
+ * string.  Each helper returns the new offset, or 0 when the buffer is full. */
+static size_t cbor_write_uint(uint8_t* buf, size_t cap, size_t pos, uint64_t v) {
+    size_t need = v < 24 ? 1 : v <= 0xFF ? 2 : v <= 0xFFFF ? 3 : v <= 0xFFFFFFFF ? 5 : 9;
+    if (pos + need > cap) return 0;
+    if (v < 24) {
+        buf[pos++] = (uint8_t)v;
+    } else if (v <= 0xFF) {
+        buf[pos++] = 0x18;
+        buf[pos++] = (uint8_t)v;
+    } else if (v <= 0xFFFF) {
+        buf[pos++] = 0x19;
+        buf[pos++] = (uint8_t)(v >> 8);
+        buf[pos++] = (uint8_t)v;
+    } else if (v <= 0xFFFFFFFF) {
+        buf[pos++] = 0x1A;
+        for (int shift = 24; shift >= 0; shift -= 8) buf[pos++] = (uint8_t)(v >> shift);
+    } else {
+        buf[pos++] = 0x1B;
+        for (int shift = 56; shift >= 0; shift -= 8) buf[pos++] = (uint8_t)(v >> shift);
+    }
+    return pos;
+}
+
+static size_t cbor_write_array(uint8_t* buf, size_t cap, size_t pos, size_t count) {
+    if (count < 24) {
+        if (pos + 1 > cap) return 0;
+        buf[pos++] = (uint8_t)(0x80 | count);
+        return pos;
+    }
+    if (count > 0xFF) return 0;
+    if (pos + 2 > cap) return 0;
+    buf[pos++] = 0x98;
+    buf[pos++] = (uint8_t)count;
+    return pos;
+}
+
+static size_t cbor_write_bytes_head(uint8_t* buf, size_t cap, size_t pos, size_t len) {
+    if (len < 24) {
+        if (pos + 1 > cap) return 0;
+        buf[pos++] = (uint8_t)(0x40 | len);
+        return pos;
+    }
+    if (len <= 0xFF) {
+        if (pos + 2 > cap) return 0;
+        buf[pos++] = 0x58;
+        buf[pos++] = (uint8_t)len;
+        return pos;
+    }
+    if (len <= 0xFFFF) {
+        if (pos + 3 > cap) return 0;
+        buf[pos++] = 0x59;
+        buf[pos++] = (uint8_t)(len >> 8);
+        buf[pos++] = (uint8_t)len;
+        return pos;
+    }
+    return 0;
+}
+
+size_t ur_multipart_count(size_t cbor_len, size_t fragment_len) {
+    if (cbor_len == 0 || fragment_len == 0) return 0;
+    return (cbor_len + fragment_len - 1) / fragment_len;
+}
+
+bool ur_multipart_encode_part(const char* type, const uint8_t* cbor, size_t cbor_len,
+                              size_t fragment_len, uint32_t seq_num, char** out_ur) {
+    if (!type || !type[0] || !cbor || cbor_len == 0 || !out_ur) return false;
+    *out_ur = NULL;
+
+    bytewords_init();
+    crc32_init();
+
+    const size_t seq_len = ur_multipart_count(cbor_len, fragment_len);
+    if (seq_len == 0 || seq_len > UINT32_MAX || seq_num < 1 || seq_num > seq_len) return false;
+
+    /* All fragments are the same size; the last one is zero padded. */
+    const size_t frag = (cbor_len + seq_len - 1) / seq_len;
+
+    const size_t mask_len = (seq_len + 7) / 8;
+    uint8_t*     mask     = calloc(mask_len, 1);
+    uint8_t*     data     = calloc(frag, 1);
+    uint8_t*     part     = NULL;
+    char*        ur       = NULL;
+    bool         ok       = false;
+    if (!mask || !data) goto done;
+
+    const uint32_t checksum = crc32(cbor, cbor_len);
+    if (!fountain_choose_fragments(seq_num, seq_len, checksum, mask, mask_len)) goto done;
+
+    for (size_t f = 0; f < seq_len; f++) {
+        if (!(mask[f / 8] & (1u << (f % 8)))) continue;
+        const size_t off = f * frag;
+        const size_t n   = off >= cbor_len ? 0 : (cbor_len - off < frag ? cbor_len - off : frag);
+        for (size_t i = 0; i < n; i++) data[i] ^= cbor[off + i];
+    }
+
+    /* Part message: [seq_num, seq_len, cbor_len, checksum, data]. */
+    const size_t part_cap = 32 + frag;
+    part                  = malloc(part_cap);
+    if (!part) goto done;
+    size_t pos = cbor_write_array(part, part_cap, 0, 5);
+    pos        = pos ? cbor_write_uint(part, part_cap, pos, seq_num) : 0;
+    pos        = pos ? cbor_write_uint(part, part_cap, pos, seq_len) : 0;
+    pos        = pos ? cbor_write_uint(part, part_cap, pos, cbor_len) : 0;
+    pos        = pos ? cbor_write_uint(part, part_cap, pos, checksum) : 0;
+    pos        = pos ? cbor_write_bytes_head(part, part_cap, pos, frag) : 0;
+    if (pos == 0 || pos + frag > part_cap) goto done;
+    memcpy(part + pos, data, frag);
+    pos += frag;
+
+    /* "ur:<type>/<seq>-<len>/<minimal Bytewords(part + CRC-32(part))>" */
+    const size_t type_len = strlen(type);
+    const size_t ur_cap   = 3 + type_len + 1 + 24 + 1 + 2 * (pos + 4) + 1;
+    ur                    = malloc(ur_cap);
+    if (!ur) goto done;
+
+    size_t o = 0;
+    memcpy(ur + o, "ur:", 3);
+    o += 3;
+    memcpy(ur + o, type, type_len);
+    o += type_len;
+    ur[o++]   = '/';
+    int wrote = snprintf(ur + o, ur_cap - o, "%u-%u/", (unsigned)seq_num, (unsigned)seq_len);
+    if (wrote <= 0 || (size_t)wrote >= ur_cap - o) goto done;
+    o += (size_t)wrote;
+
+    for (size_t i = 0; i < pos; i++) {
+        const char* w = BYTEWORDS + (size_t)part[i] * 4;
+        ur[o++]       = w[0];
+        ur[o++]       = w[3];
+    }
+    const uint32_t pcrc = crc32(part, pos);
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        const char* w = BYTEWORDS + (size_t)((pcrc >> shift) & 0xFFu) * 4;
+        ur[o++]       = w[0];
+        ur[o++]       = w[3];
+    }
+    ur[o] = '\0';
+
+    *out_ur = ur;
+    ur      = NULL;
+    ok      = true;
+
+done:
+    free(mask);
+    secure_memzero(data, frag);
+    free(data);
+    free(part);
+    free(ur);
+    return ok;
 }
 
 /* -- Multipart UR (fountain) decoding ---------------------------------- */

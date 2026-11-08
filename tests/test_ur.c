@@ -5,6 +5,7 @@
 
 #include "crypto/fountain.h"
 #include "crypto/ur.h"
+#include "crypto/ur_descriptor.h"
 #include "crypto/ur_psbt.h"
 #include "unity.h"
 #include "util/utils.h"
@@ -742,6 +743,99 @@ static void test_ur_multipart_single_part(void) {
     free(bytes);
 }
 
+/* The multipart encoder must produce exactly what the multipart decoder wants:
+ * feed every part of an output-descriptor UR back in and expect the descriptor
+ * text out. A larger-than-one-fragment payload exercises the fountain parts
+ * (seq_num > seq_len), not just the plain fragments. */
+static void test_ur_multipart_descriptor_roundtrip(void) {
+    const char* text =
+        "wsh(sortedmulti(2,[73c5da0a/48'/0'/0'/"
+        "2']xpub6DkFAXWQ2dHxq2vatrt9qyA3bXYU4ToWQwCHbf5XB2mSTe"
+        "xcHZCeKS1VZYcPoBd5X8yVcbXFHJR9R8UCVpt82VX1VhR28mCyxUFL4r6KFrf/<0;1>/*,"
+        "[b8688df1/48'/0'/0'/"
+        "2']xpub6FQya7zGhR92kacYsNnjreouvnHJMpXYsUXnW6NJJAJRCKsa26TzDy4LdnGhEurr3d6y1J"
+        "8PJ7EEMKQp74XTqYvmGJNogYXSKDszYHtF8mX/<0;1>/*,#l2pdw8zh";
+
+    uint8_t* cbor     = NULL;
+    size_t   cbor_len = 0;
+    TEST_ASSERT_TRUE(ur_descriptor_encode(text, &cbor, &cbor_len));
+    TEST_ASSERT_TRUE(cbor_len > 0);
+    TEST_ASSERT_EQUAL_HEX8(0xA1, cbor[0]);
+
+    /* Small fragments: several parts, and some with seq_num > seq_len. */
+    const size_t fragment = 60;
+    const size_t count    = ur_multipart_count(cbor_len, fragment);
+    TEST_ASSERT_TRUE(count >= 4);
+    TEST_ASSERT_EQUAL_UINT(count, ur_multipart_count(cbor_len, fragment));
+    TEST_ASSERT_EQUAL_UINT(0, ur_multipart_count(0, fragment));
+    TEST_ASSERT_EQUAL_UINT(0, ur_multipart_count(cbor_len, 0));
+
+    ur_descriptor_decoder_t* d = ur_descriptor_decoder_new();
+    TEST_ASSERT_NOT_NULL(d);
+
+    char* got = NULL;
+    int   r   = 0;
+    /* Parts 1..count, then a couple past the plain fragments (fountain codes). */
+    for (uint32_t seq = 1; seq <= count + 2 && r != 1; seq++) {
+        char* ur = NULL;
+        TEST_ASSERT_TRUE(
+            ur_multipart_encode_part("output-descriptor", cbor, cbor_len, fragment, seq, &ur));
+        TEST_ASSERT_NOT_NULL(strstr(ur, "ur:output-descriptor/"));
+        r = ur_descriptor_decoder_receive(d, ur, strlen(ur), &got);
+        free(ur);
+    }
+
+    TEST_ASSERT_EQUAL_INT(1, r);
+    TEST_ASSERT_NOT_NULL(got);
+    TEST_ASSERT_EQUAL_STRING(text, got);
+
+    free(got);
+    ur_descriptor_decoder_free(d);
+    free(cbor);
+}
+
+/* A single fragment carries the whole message. */
+static void test_ur_multipart_single_fragment_roundtrip(void) {
+    const char* text = "wpkh([d34db33f/84'/0'/0']xpub6CatWdiZiodmUeTDp8LT5or8nmbKNcuyvz7WyksVFkKB4"
+                       "RHPR2pebPGNHw6fvTxIpeHbYUj35kGy9YGbL6r4JXvN8WSmDs/0/*)#checksum";
+
+    uint8_t* cbor     = NULL;
+    size_t   cbor_len = 0;
+    TEST_ASSERT_TRUE(ur_descriptor_encode(text, &cbor, &cbor_len));
+
+    char* ur = NULL;
+    TEST_ASSERT_TRUE(ur_multipart_encode_part("output-descriptor", cbor, cbor_len, 4096, 1, &ur));
+    TEST_ASSERT_NULL(strstr(ur, "/1-1/") ? NULL : ur); /* geometry check below */
+
+    ur_descriptor_decoder_t* d = ur_descriptor_decoder_new();
+    TEST_ASSERT_NOT_NULL(d);
+    char* got = NULL;
+    TEST_ASSERT_EQUAL_INT(1, ur_descriptor_decoder_receive(d, ur, strlen(ur), &got));
+    TEST_ASSERT_EQUAL_STRING(text, got);
+
+    free(got);
+    ur_descriptor_decoder_free(d);
+    free(ur);
+    free(cbor);
+}
+
+static void test_ur_multipart_encode_bounds(void) {
+    uint8_t cbor[8] = {0xA1, 0x01, 0x60, 0, 0, 0, 0, 0};
+    char*   ur      = NULL;
+
+    TEST_ASSERT_FALSE(ur_multipart_encode_part(NULL, cbor, sizeof(cbor), 16, 1, &ur));
+    TEST_ASSERT_FALSE(ur_multipart_encode_part("", cbor, sizeof(cbor), 16, 1, &ur));
+    TEST_ASSERT_FALSE(ur_multipart_encode_part("output-descriptor", NULL, 4, 16, 1, &ur));
+    TEST_ASSERT_FALSE(ur_multipart_encode_part("output-descriptor", cbor, 0, 16, 1, &ur));
+    TEST_ASSERT_FALSE(ur_multipart_encode_part("output-descriptor", cbor, sizeof(cbor), 0, 1, &ur));
+    /* seq_num must be inside 1..count */
+    TEST_ASSERT_FALSE(
+        ur_multipart_encode_part("output-descriptor", cbor, sizeof(cbor), 16, 0, &ur));
+    TEST_ASSERT_FALSE(
+        ur_multipart_encode_part("output-descriptor", cbor, sizeof(cbor), 16, 9, &ur));
+    TEST_ASSERT_NULL(ur);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_ur_seed_vector);
@@ -763,5 +857,8 @@ int main(void) {
     RUN_TEST(test_ur_psbt_encode_guard);
     RUN_TEST(test_ur_psbt_decode_magic);
     RUN_TEST(test_ur_multipart_single_part);
+    RUN_TEST(test_ur_multipart_descriptor_roundtrip);
+    RUN_TEST(test_ur_multipart_single_fragment_roundtrip);
+    RUN_TEST(test_ur_multipart_encode_bounds);
     return UNITY_END();
 }

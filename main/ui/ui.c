@@ -11,6 +11,7 @@
 #include "dice.h"
 #include "hal.h"
 #include "mnemonic_view.h"
+#include "qr/qr.h"
 #include "src/widgets/label/lv_label_private.h"
 #include "touch.h"
 #include "ui_internal.h"
@@ -464,8 +465,9 @@ void ui_show_splash(ui_cb_t on_done) {
 
 /* -- Screens ---------------------------------------------------------- */
 void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
-                  lv_event_cb_t on_test_error) {
+                  lv_event_cb_t on_multisig, lv_event_cb_t on_test_error) {
     ASSERT_OR_DIE(on_new_wallet, "null on_new_wallet");
+    ASSERT_OR_DIE(on_multisig, "null on_multisig");
     ASSERT_OR_DIE(on_test_error, "null on_test_error");
 
     if (!main_scr) {
@@ -481,15 +483,21 @@ void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
         lv_image_set_inner_align(logo, LV_IMAGE_ALIGN_STRETCH);
         lv_obj_align(logo, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(10));
 
+        // Three hero buttons when there is a camera to scan with, two without.
+        const bool camera = hal_camera_available();
+
         ui_add_btn_evt(scr, "Create Seed Mnemonic", on_new_wallet, NULL, UI_BTN_SIZE_HERO,
-                       LV_ALIGN_CENTER, 0, -30);
+                       LV_ALIGN_CENTER, 0, ui_scale(-60));
 
         // Transaction/PSBT inspection is only meaningful with a camera.
-        if (hal_camera_available()) {
+        if (camera) {
             ASSERT_OR_DIE(on_inspect_tx, "null on_inspect_tx");
             ui_add_btn_evt(scr, "Scan Transaction/PSBT", on_inspect_tx, NULL, UI_BTN_SIZE_HERO,
-                           LV_ALIGN_CENTER, 0, 30);
+                           LV_ALIGN_CENTER, 0, 0);
         }
+
+        ui_add_btn_evt(scr, "Build Multisig", on_multisig, NULL, UI_BTN_SIZE_HERO, LV_ALIGN_CENTER,
+                       0, ui_scale(camera ? 60 : 0));
 
         // Test error button
         lv_obj_t* test_btn = ui_add_btn_evt(scr, "test error!", on_test_error, NULL,
@@ -1810,6 +1818,106 @@ void ui_show_seedqr_help(ui_cb_t on_close) {
     ui_swap_screen(s);
 }
 
+/* Animated (multi-part) QR: one payload on screen at a time, each encoded when
+ * its turn comes, so only one grid buffer is ever allocated. */
+#define QR_ANIM_MS 600
+
+typedef struct {
+    const char* const* payloads;
+    size_t             count;
+    size_t             index;
+    lv_obj_t*          img;
+    lv_obj_t*          part;
+    lv_timer_t*        timer;
+} qr_anim_t;
+
+static qr_anim_t s_qr_anim;
+
+static uint32_t qr_paint(const uint8_t* cells, uint32_t size);
+static void     qr_free_buffer(void);
+
+static void qr_anim_tick(lv_timer_t* timer) {
+    (void)timer;
+    if (!s_qr_anim.payloads || s_qr_anim.count == 0) return;
+
+    s_qr_anim.index = (s_qr_anim.index + 1) % s_qr_anim.count;
+
+    qr_grid_t grid = {0};
+    if (!qr_encode((const uint8_t*)s_qr_anim.payloads[s_qr_anim.index],
+                   strlen(s_qr_anim.payloads[s_qr_anim.index]), QR_MODE_BYTE, &grid))
+        return;
+    qr_paint(grid.cells, grid.size);
+    qr_grid_free(&grid);
+
+    if (s_qr_anim.img) {
+        lv_image_set_src(s_qr_anim.img, &seedqr_dsc);
+        lv_obj_invalidate(s_qr_anim.img);
+    }
+    if (s_qr_anim.part)
+        lv_label_set_text_fmt(s_qr_anim.part, "%u/%u", (unsigned)(s_qr_anim.index + 1),
+                              (unsigned)s_qr_anim.count);
+}
+
+/* Free the shared RGB565 image buffer (the animation, if any, keeps running). */
+static void qr_free_buffer(void) {
+    if (seedqr_buf) {
+        secure_memzero(seedqr_buf, seedqr_buf_bytes);
+        free(seedqr_buf);
+        seedqr_buf = NULL;
+    }
+}
+
+/* Paint a QR grid into the shared image buffer (one at a time: the buffer is
+ * reused as the animated screen advances). Returns the image side in pixels. */
+static uint32_t qr_paint(const uint8_t* cells, uint32_t size) {
+    // White quiet-zone border (4 modules), then the data modules
+    const uint32_t border = 4;
+    const uint32_t total  = size + 2 * border;
+
+    // Fit the screen, and leave the right-hand column for the title and caption:
+    // a dense code (a key is ~53 modules, a descriptor ~77) has to take a
+    // smaller module size than a SeedQR, so there is no floor to clamp to.
+    uint32_t budget = (uint32_t)ui_scale(300);
+    if (budget > (uint32_t)LV_HOR_RES) budget = (uint32_t)LV_HOR_RES;
+    const uint32_t text_col = (uint32_t)ui_scale(200);
+    if (LV_HOR_RES > (int32_t)text_col && budget > (uint32_t)LV_HOR_RES - text_col)
+        budget = (uint32_t)LV_HOR_RES - text_col;
+    uint32_t scale = budget / total;
+    if (scale == 0) scale = 1;
+    const uint32_t px = scale * total;
+
+    qr_free_buffer();
+    seedqr_buf_bytes = (size_t)px * px * 2;
+    seedqr_buf       = calloc(seedqr_buf_bytes, 1);
+    ASSERT_OR_DIE(seedqr_buf, "out of memory for SeedQR buffer");
+    memset(seedqr_buf, 0xFF, seedqr_buf_bytes); // white (0xFFFF)
+
+    uint16_t*      dst = (uint16_t*)seedqr_buf;
+    const uint32_t off = border * scale;
+    for (uint32_t y = 0; y < size; y++) {
+        for (uint32_t x = 0; x < size; x++) {
+            if (!cells[(size_t)y * size + x]) continue; // already white
+            const uint32_t by = off + y * scale;
+            const uint32_t bx = off + x * scale;
+            for (uint32_t dy = 0; dy < scale; dy++) {
+                for (uint32_t dx = 0; dx < scale; dx++) {
+                    dst[(size_t)(by + dy) * px + (bx + dx)] = 0x0000;
+                }
+            }
+        }
+    }
+
+    memset(&seedqr_dsc, 0, sizeof(seedqr_dsc));
+    seedqr_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+    seedqr_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+    seedqr_dsc.header.w      = (uint16_t)px;
+    seedqr_dsc.header.h      = (uint16_t)px;
+    seedqr_dsc.header.stride = (uint16_t)(px * 2);
+    seedqr_dsc.data_size     = (uint32_t)seedqr_buf_bytes;
+    seedqr_dsc.data          = seedqr_buf;
+    return px;
+}
+
 void ui_show_qr(const char* title, const uint8_t* cells, uint32_t size, const char* caption,
                 const char* warning, ui_cb_t on_done) {
     ASSERT_OR_DIE(title, "null title");
@@ -1857,50 +1965,7 @@ void ui_show_qr(const char* title, const uint8_t* cells, uint32_t size, const ch
         }
     }
 
-    // White quiet-zone border (4 modules), then the data modules
-    uint32_t border = 4;
-    uint32_t total  = size + 2 * border;
-    // Fit the screen, and leave the right-hand column for the title and caption:
-    // a dense code (a key is ~53 modules, a descriptor ~53) has to take a
-    // smaller module size than a SeedQR, so there is no floor to clamp to.
-    uint32_t budget = (uint32_t)ui_scale(300);
-    if (budget > (uint32_t)LV_HOR_RES) budget = (uint32_t)LV_HOR_RES;
-    const uint32_t text_col = (uint32_t)ui_scale(200);
-    if (LV_HOR_RES > (int32_t)text_col && budget > (uint32_t)LV_HOR_RES - text_col)
-        budget = (uint32_t)LV_HOR_RES - text_col;
-    uint32_t scale = budget / total;
-    if (scale == 0) scale = 1;
-    uint32_t px = scale * total;
-
-    // Build one RGB565 buffer and show it as a single image
-    seedqr_buf_bytes = (size_t)px * px * 2;
-    seedqr_buf       = calloc(seedqr_buf_bytes, 1);
-    ASSERT_OR_DIE(seedqr_buf, "out of memory for SeedQR buffer");
-    memset(seedqr_buf, 0xFF, seedqr_buf_bytes); // white (0xFFFF)
-
-    uint16_t* dst = (uint16_t*)seedqr_buf;
-    uint32_t  off = border * scale;
-    for (uint32_t y = 0; y < size; y++) {
-        for (uint32_t x = 0; x < size; x++) {
-            if (!cells[(size_t)y * size + x]) continue; // already white
-            uint32_t by = off + y * scale;
-            uint32_t bx = off + x * scale;
-            for (uint32_t dy = 0; dy < scale; dy++) {
-                for (uint32_t dx = 0; dx < scale; dx++) {
-                    dst[(size_t)(by + dy) * px + (bx + dx)] = 0x0000;
-                }
-            }
-        }
-    }
-
-    memset(&seedqr_dsc, 0, sizeof(seedqr_dsc));
-    seedqr_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
-    seedqr_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
-    seedqr_dsc.header.w      = (uint16_t)px;
-    seedqr_dsc.header.h      = (uint16_t)px;
-    seedqr_dsc.header.stride = (uint16_t)(px * 2);
-    seedqr_dsc.data_size     = (uint32_t)seedqr_buf_bytes;
-    seedqr_dsc.data          = seedqr_buf;
+    qr_paint(cells, size);
 
     lv_obj_t* img = lv_image_create(s);
     lv_image_set_src(img, &seedqr_dsc);
@@ -1911,12 +1976,86 @@ void ui_show_qr(const char* title, const uint8_t* cells, uint32_t size, const ch
     ui_swap_screen(s);
 }
 
-void ui_seedqr_cleanup(void) {
-    if (seedqr_buf) {
-        secure_memzero(seedqr_buf, seedqr_buf_bytes);
-        free(seedqr_buf);
-        seedqr_buf = NULL;
+void ui_show_qr_anim(const char* title, const char* const* payloads, size_t count,
+                     const char* caption, const char* warning, ui_cb_t on_done) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(payloads, "null payloads");
+    ASSERT_OR_DIE(count > 0, "no payloads");
+    ASSERT_OR_DIE(on_done, "null on_done");
+
+    lv_obj_t* s = ui_make_screen();
+
+    lv_obj_t* t = lv_label_create(s);
+    lv_label_set_text(t, title);
+    lv_obj_set_style_text_color(t, lv_color_white(), 0);
+    lv_obj_set_style_text_font(t, ui_font(28), 0);
+    lv_obj_align(t, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(15));
+
+    if (caption && caption[0]) {
+        lv_obj_t* cap = lv_label_create(s);
+        lv_label_set_text(cap, caption);
+        lv_obj_set_style_text_color(cap, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(cap, ui_font(16), 0);
+        lv_obj_set_style_text_align(cap, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(cap, ui_scale(150));
+        lv_label_set_long_mode(cap, LV_LABEL_LONG_WRAP);
+        lv_obj_align(cap, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(48));
     }
+
+    if (warning && warning[0]) {
+        lv_obj_t* w = lv_label_create(s);
+        lv_label_set_text(w, warning);
+        lv_obj_set_style_text_color(w, lv_color_hex(0xFF4444), 0);
+        lv_obj_set_style_text_font(w, ui_font(14), 0);
+        lv_obj_set_style_text_align(w, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_set_width(w, ui_scale(150));
+        lv_label_set_long_mode(w, LV_LABEL_LONG_WRAP);
+        lv_obj_align(w, LV_ALIGN_TOP_RIGHT, ui_scale(-35), ui_scale(96));
+    }
+
+    /* Which part is on screen, so a scanner app can show its progress. */
+    lv_obj_t* part = lv_label_create(s);
+    lv_obj_set_style_text_color(part, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_style_text_font(part, ui_font(16), 0);
+    lv_obj_align(part, LV_ALIGN_BOTTOM_RIGHT, ui_scale(-20), ui_scale(-64));
+
+    qr_grid_t first = {0};
+    ASSERT_OR_DIE(qr_encode((const uint8_t*)payloads[0], strlen(payloads[0]), QR_MODE_BYTE, &first),
+                  "animated QR encode failed");
+    qr_paint(first.cells, first.size);
+    qr_grid_free(&first);
+
+    lv_obj_t* img = lv_image_create(s);
+    lv_image_set_src(img, &seedqr_dsc);
+    lv_obj_align(img, LV_ALIGN_LEFT_MID, ui_scale(10), 0);
+
+    ui_add_btn(s, "Done", on_done, UI_BTN_SIZE_MED, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    ui_swap_screen(s);
+
+    s_qr_anim.payloads = payloads;
+    s_qr_anim.count    = count;
+    s_qr_anim.index    = 0;
+    s_qr_anim.img      = img;
+    s_qr_anim.part     = part;
+    lv_label_set_text_fmt(part, "1/%u", (unsigned)count);
+    if (s_qr_anim.timer) {
+        lv_timer_delete(s_qr_anim.timer);
+        s_qr_anim.timer = NULL;
+    }
+    s_qr_anim.timer = lv_timer_create(qr_anim_tick, QR_ANIM_MS, NULL);
+    ASSERT_OR_DIE(s_qr_anim.timer, "could not start the animated QR timer");
+}
+
+void ui_seedqr_cleanup(void) {
+    if (s_qr_anim.timer) {
+        lv_timer_delete(s_qr_anim.timer);
+        s_qr_anim.timer = NULL;
+    }
+    s_qr_anim.payloads = NULL;
+    s_qr_anim.count    = 0;
+    s_qr_anim.img      = NULL;
+    s_qr_anim.part     = NULL;
+    qr_free_buffer();
 }
 
 static lv_obj_t* qr_scan_bar    = NULL;
@@ -2093,6 +2232,117 @@ void ui_show_descriptor_overview(const char* title, const char* body, ui_cb_t on
     ui_show_text_screen(title, body, NULL, "Continue", on_continue, "Cancel", on_cancel);
 }
 
+/* -- Multisig wallet -------------------------------------------------- */
+static void         row_card_add(lv_obj_t* cont, const char* label_text, const char* value_text,
+                                 bool secret, lv_coord_t width, uint8_t value_px, size_t index,
+                                 lv_event_cb_t on_qr);
+static ui_uint_cb_t multisig_row_handler = NULL;
+
+static void multisig_row_cb(lv_event_t* e) {
+    if (!multisig_row_handler) return;
+    multisig_row_handler((uint8_t)(uintptr_t)lv_event_get_user_data(e));
+}
+
+void ui_show_multisig(const ui_multisig_view_t* view, ui_uint_cb_t on_row_qr, ui_cb_t on_primary,
+                      ui_cb_t on_done) {
+    ASSERT_OR_DIE(view, "null view");
+    ASSERT_OR_DIE(on_primary, "null on_primary");
+    ASSERT_OR_DIE(on_done, "null on_done");
+    ASSERT_OR_DIE(view->summary, "null summary");
+    ASSERT_OR_DIE(view->primary, "null primary");
+    ASSERT_OR_DIE(view->busy || view->row_count > 0, "nothing to show");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, "Multisig Wallet");
+
+    /* Threshold and network in the seed green, then how far the wallet is. */
+    lv_obj_t* sum = lv_label_create(s);
+    lv_label_set_text(sum, view->summary);
+    lv_obj_set_style_text_color(sum, lv_color_hex(UI_COLOR_SEED_GREEN), 0);
+    lv_obj_set_style_text_font(sum, ui_font(14), 0);
+    lv_obj_align(sum, LV_ALIGN_TOP_MID, 0, ui_scale(46));
+
+    lv_coord_t top = ui_scale(46) + ui_scale(18);
+    if (view->progress && view->progress[0]) {
+        lv_obj_t* prog = lv_label_create(s);
+        lv_label_set_text(prog, view->progress);
+        lv_obj_set_style_text_color(prog, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_text_font(prog, ui_font(12), 0);
+        lv_obj_align(prog, LV_ALIGN_TOP_MID, 0, top);
+        top += ui_scale(18);
+    }
+    top += ui_scale(4);
+
+    lv_coord_t cont_h = LV_VER_RES - top - ui_scale(58);
+    if (cont_h < ui_scale(40)) cont_h = ui_scale(40);
+
+    lv_obj_t* cont = lv_obj_create(s);
+    lv_obj_set_size(cont, ui_scale(440), cont_h);
+    lv_obj_align(cont, LV_ALIGN_TOP_MID, 0, top);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, ui_scale(4), 0);
+    lv_obj_set_style_pad_row(cont, ui_scale(3), 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(cont, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    multisig_row_handler = on_row_qr;
+
+    /* The spinner sits above the rows instead of replacing them, so the screen
+     * does not jump when a derivation starts or ends. */
+    if (view->busy) {
+        lv_obj_t* strip = lv_obj_create(cont);
+        lv_obj_set_width(strip, ui_scale(432));
+        lv_obj_set_height(strip, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(strip, lv_color_hex(0x1A1A1A), 0);
+        lv_obj_set_style_border_width(strip, 0, 0);
+        lv_obj_set_style_radius(strip, ui_scale(4), 0);
+        lv_obj_set_style_pad_all(strip, ui_scale(4), 0);
+        lv_obj_set_style_pad_column(strip, ui_scale(10), 0);
+        lv_obj_set_flex_flow(strip, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(strip, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        lv_obj_t* sp = lv_spinner_create(strip);
+        lv_obj_set_size(sp, ui_scale(26), ui_scale(26));
+        lv_spinner_set_anim_params(sp, 1000, 60);
+
+        lv_obj_t* lbl = lv_label_create(strip);
+        lv_label_set_text(lbl, view->busy_text ? view->busy_text : "Deriving keys...");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(lbl, ui_font(12), 0);
+        lv_obj_set_width(lbl, ui_scale(380));
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    }
+
+    for (size_t i = 0; i < view->row_count; i++) {
+        const ui_multisig_row_t* r = &view->rows[i];
+        row_card_add(cont, NULL, r->value, false, ui_scale(432), 12, i,
+                     (r->ready && on_row_qr) ? multisig_row_cb : NULL);
+    }
+
+    /* The descriptor defines the wallet, so it comes before the addresses it
+     * derives; the container scrolls when a wallet has many cosigners. */
+    if (view->descriptor && view->descriptor[0]) {
+        row_card_add(cont, "descriptor", view->descriptor, false, ui_scale(432), 10,
+                     UI_MULTISIG_QR_DESCRIPTOR, on_row_qr ? multisig_row_cb : NULL);
+    }
+    if (view->address && view->address[0]) {
+        row_card_add(cont, "receive address (m/0/0)", view->address, false, ui_scale(432), 10,
+                     UI_MULTISIG_QR_RECEIVE, on_row_qr ? multisig_row_cb : NULL);
+    }
+    if (view->change && view->change[0]) {
+        row_card_add(cont, "change address (m/1/0)", view->change, false, ui_scale(432), 10,
+                     UI_MULTISIG_QR_CHANGE, on_row_qr ? multisig_row_cb : NULL);
+    }
+
+    ui_add_btn(s, view->primary, on_primary, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_LEFT, 20, -10);
+    ui_add_btn(s, "Done", on_done, UI_BTN_SIZE_WIDE, LV_ALIGN_BOTTOM_RIGHT, -20, -10);
+
+    ui_swap_screen(s);
+}
+
 /* -- Wallet keys ------------------------------------------------------ */
 static ui_uint_cb_t keycheck_tab_handler = NULL;
 static ui_uint_cb_t keycheck_row_handler = NULL;
@@ -2117,15 +2367,17 @@ static lv_obj_t* keycheck_plain_box(lv_obj_t* parent, lv_coord_t w) {
     return o;
 }
 
-/* One labelled value with a QR button on its right. The value wraps, so a
- * 111-character xprv takes two lines and an address takes one. */
-static void keycheck_add_row(lv_obj_t* cont, const ui_keycheck_row_t* row, lv_coord_t width,
-                             size_t index) {
+/* One labelled value, with a QR button on its right when @p on_qr is given.
+ * The value wraps, so a 111-character xpub takes two lines; @p value_px is
+ * smaller for addresses, which are long but should stay on one line. */
+static void row_card_add(lv_obj_t* cont, const char* label_text, const char* value_text,
+                         bool secret, lv_coord_t width, uint8_t value_px, size_t index,
+                         lv_event_cb_t on_qr) {
     const lv_coord_t qr_w  = ui_scale(60);
     const lv_coord_t qr_h  = ui_scale(34);
     const lv_coord_t gap   = ui_scale(8);
     const lv_coord_t pad   = ui_scale(4);
-    const lv_coord_t col_w = width - qr_w - gap - 2 * pad;
+    const lv_coord_t col_w = width - (on_qr ? qr_w + gap : 0) - 2 * pad;
 
     lv_obj_t* box = lv_obj_create(cont);
     lv_obj_set_width(box, width);
@@ -2142,18 +2394,22 @@ static void keycheck_add_row(lv_obj_t* cont, const ui_keycheck_row_t* row, lv_co
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
-    lv_obj_t* label = lv_label_create(col);
-    lv_label_set_text(label, row->label);
-    lv_obj_set_style_text_color(label,
-                                row->secret ? lv_color_hex(0xFF6B6B) : lv_color_hex(0x9A9A9A), 0);
-    lv_obj_set_style_text_font(label, ui_font(12), 0);
+    if (label_text && label_text[0]) {
+        lv_obj_t* label = lv_label_create(col);
+        lv_label_set_text(label, label_text);
+        lv_obj_set_style_text_color(label, secret ? lv_color_hex(0xFF6B6B) : lv_color_hex(0x9A9A9A),
+                                    0);
+        lv_obj_set_style_text_font(label, ui_font(value_px > 12 ? 12 : value_px), 0);
+    }
 
     lv_obj_t* value = lv_label_create(col);
-    lv_label_set_text(value, row->value);
-    lv_obj_set_style_text_color(value, row->secret ? lv_color_hex(0xFFD0D0) : lv_color_white(), 0);
-    lv_obj_set_style_text_font(value, ui_font(12), 0);
+    lv_label_set_text(value, value_text);
+    lv_obj_set_style_text_color(value, secret ? lv_color_hex(0xFFD0D0) : lv_color_white(), 0);
+    lv_obj_set_style_text_font(value, ui_font(value_px), 0);
     lv_obj_set_width(value, col_w);
     lv_label_set_long_mode(value, LV_LABEL_LONG_WRAP);
+
+    if (!on_qr) return;
 
     lv_obj_t* qr = lv_button_create(box);
     lv_obj_set_size(qr, qr_w, qr_h);
@@ -2163,7 +2419,13 @@ static void keycheck_add_row(lv_obj_t* cont, const ui_keycheck_row_t* row, lv_co
     lv_obj_set_style_text_color(ql, lv_color_white(), 0);
     lv_obj_set_style_text_font(ql, ui_font(14), 0);
     lv_obj_center(ql);
-    lv_obj_add_event_cb(qr, keycheck_row_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)index);
+    lv_obj_add_event_cb(qr, on_qr, LV_EVENT_CLICKED, (void*)(uintptr_t)index);
+}
+
+/* One row of the keys screen. */
+static void keycheck_add_row(lv_obj_t* cont, const ui_keycheck_row_t* row, lv_coord_t width,
+                             size_t index) {
+    row_card_add(cont, row->label, row->value, row->secret, width, 12, index, keycheck_row_cb);
 }
 
 /* One policy at a time behind a row of tabs. A policy whose key material is
@@ -2909,6 +3171,67 @@ void ui_show_choice(const char* title, const char* msg, const char* const* optio
 
         lv_obj_t* b = ui_add_btn(list, options[i], NULL, UI_BTN_SIZE_HERO, LV_ALIGN_TOP_MID, 0, 0);
         lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_user_data(b, ctx);
+        lv_obj_add_event_cb(b, choice_invoke_cb, LV_EVENT_CLICKED, ctx);
+        lv_obj_add_event_cb(b, choice_ctx_delete_cb, LV_EVENT_DELETE, NULL);
+    }
+
+    if (on_cancel)
+        ui_add_btn(s, "Cancel", on_cancel, UI_BTN_SIZE_SMALL, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
+    ui_swap_screen(s);
+}
+
+void ui_show_choice_compact(const char* title, const char* msg, const char* const* options,
+                            size_t count, ui_uint_cb_t on_choice, ui_cb_t on_cancel) {
+    ASSERT_OR_DIE(title, "null title");
+    ASSERT_OR_DIE(options, "null options");
+    ASSERT_OR_DIE(on_choice, "null on_choice");
+    ASSERT_OR_DIE(count > 0 && count <= 255, "invalid option count");
+
+    lv_obj_t* s = ui_make_screen();
+    ui_add_title(s, title);
+
+    lv_coord_t top = ui_scale(60);
+    if (msg && msg[0]) {
+        lv_obj_t* m = lv_label_create(s);
+        lv_label_set_text(m, msg);
+        lv_obj_set_style_text_color(m, lv_color_white(), 0);
+        lv_obj_set_style_text_font(m, ui_font(14), 0);
+        lv_obj_set_style_text_align(m, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(m, ui_scale(440));
+        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+        lv_obj_align(m, LV_ALIGN_TOP_MID, 0, ui_scale(52));
+        lv_obj_update_layout(m);
+        top = ui_scale(52) + lv_obj_get_height(m) + ui_scale(10);
+    }
+
+    lv_coord_t avail = LV_VER_RES - top - ui_scale(56);
+    if (avail < ui_scale(44)) avail = ui_scale(44);
+
+    /* Small buttons that wrap, so a range like 2..15 keys fits at once. */
+    lv_obj_t* grid = lv_obj_create(s);
+    lv_obj_set_size(grid, ui_scale(440), avail);
+    lv_obj_align(grid, LV_ALIGN_TOP_MID, 0, top);
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(grid, 0, 0);
+    lv_obj_set_style_pad_all(grid, 0, 0);
+    lv_obj_set_style_pad_row(grid, ui_scale(8), 0);
+    lv_obj_set_style_pad_column(grid, ui_scale(8), 0);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(grid, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_AUTO);
+
+    for (size_t i = 0; i < count; i++) {
+        choice_ctx_t* ctx = lv_malloc(sizeof(*ctx));
+        ASSERT_OR_DIE(ctx, "choice ctx alloc");
+        ctx->cb    = on_choice;
+        ctx->index = (uint8_t)i;
+
+        lv_obj_t* b = ui_add_btn(grid, options[i], NULL, UI_BTN_SIZE_MED, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_set_width(b, ui_scale(104));
+        lv_obj_set_height(b, ui_scale(40));
         lv_obj_set_user_data(b, ctx);
         lv_obj_add_event_cb(b, choice_invoke_cb, LV_EVENT_CLICKED, ctx);
         lv_obj_add_event_cb(b, choice_ctx_delete_cb, LV_EVENT_DELETE, NULL);

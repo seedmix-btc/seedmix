@@ -54,6 +54,36 @@ bool ur_decode(const char* ur, size_t ur_len, const char* type, uint8_t** out_cb
 bool ur_encode(const char* type, const uint8_t* cbor, size_t cbor_len, char** out_ur);
 
 /**
+ * @brief Number of fountain fragments a message needs at a given fragment size.
+ *
+ * All fragments are the same length (BCR-2024-001), so this is
+ * ``ceil(cbor_len / fragment_len)``; the caller then animates parts
+ * 1..count.
+ */
+size_t ur_multipart_count(size_t cbor_len, size_t fragment_len);
+
+/**
+ * @brief Encode fountain part @p seq_num of a multi-part UR.
+ *
+ * Part 1..seq_len carry one fragment; higher part numbers carry the XOR of a
+ * deterministic set of fragments, so a receiver that misses parts still
+ * completes from the next ones it sees.  The selection matches
+ * fountain_choose_fragments(), i.e. what ur_decoder_t expects.
+ *
+ * @param type         UR type string (e.g. "output-descriptor").
+ * @param cbor         Raw CBOR message bytes (checksummed, not fragmented here).
+ * @param cbor_len     Number of CBOR bytes.
+ * @param fragment_len Fragment size to aim for; the actual size is
+ *                     ``ceil(cbor_len / ur_multipart_count(...))``.
+ * @param seq_num      Part number, 1-based.
+ * @param out_ur       On success, set to a malloc'd NUL-terminated string
+ *                     (caller frees).
+ * @return true on success; false on invalid arguments or allocation failure.
+ */
+bool ur_multipart_encode_part(const char* type, const uint8_t* cbor, size_t cbor_len,
+                              size_t fragment_len, uint32_t seq_num, char** out_ur);
+
+/**
  * @brief CRC-32 (IEEE 802.3, same as zlib) of a byte range.
  */
 uint32_t ur_crc32(const uint8_t* data, size_t len);

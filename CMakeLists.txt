@@ -47,6 +47,7 @@ set(COMMON_SOURCES
     main/crypto/touch.c
     main/crypto/dice.c
     main/crypto/keycheck.c
+    main/crypto/multisig.c
     main/crypto/coin.c
     main/crypto/secure_stack.c
     main/crypto/bip39_wordlist.c

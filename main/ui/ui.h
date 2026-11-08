@@ -29,7 +29,7 @@ typedef enum {
 } mnemonic_type_t;
 
 void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
-                  lv_event_cb_t on_test_error);
+                  lv_event_cb_t on_multisig, lv_event_cb_t on_test_error);
 void ui_show_word_count(ui_cb_t on_12, ui_cb_t on_24);
 void ui_show_source(ui_cb_t on_generate, ui_cb_t on_enter_mnemonic, ui_cb_t on_other_source,
                     ui_cb_t on_state, ui_cb_t on_finish, bool is_additional);
@@ -63,6 +63,62 @@ void ui_show_camera_help(ui_cb_t on_close);
  */
 void ui_show_qr(const char* title, const uint8_t* cells, uint32_t size, const char* caption,
                 const char* warning, ui_cb_t on_done);
+
+/** One cosigner on the multisig wallet screen. */
+typedef struct {
+    const char* label; /**< Optional heading line; NULL keeps the row one line. */
+    const char* value; /**< "Cosigner 1  73c5da0a  m/48'/0'/0'/2'". */
+    bool        ready; /**< Has a key: the row gets a QR button. */
+} ui_multisig_row_t;
+
+/** Row QR indices that are not a cosigner.  Cosigners are 0..row_count-1. */
+enum {
+    UI_MULTISIG_QR_DESCRIPTOR = 0xFD,
+    UI_MULTISIG_QR_RECEIVE,
+    UI_MULTISIG_QR_CHANGE,
+};
+
+/**
+ * @brief The multisig wallet screen: threshold, one row per cosigner, the
+ *        descriptor, the first addresses, and a spinner over the rows while a
+ *        cosigner is derived.
+ */
+typedef struct {
+    const char*              summary;    /**< "2 of 3  ·  mainnet" */
+    const char*              progress;   /**< "2 of 3 keys entered" */
+    const char*              descriptor; /**< The wallet descriptor, or NULL. */
+    const char*              address;    /**< First receive address, or NULL. */
+    const char*              change;     /**< First change address, or NULL. */
+    const ui_multisig_row_t* rows;
+    size_t                   row_count;
+    bool                     busy;      /**< Deriving: a spinner tops the rows. */
+    const char*              busy_text; /**< "Deriving cosigner 2 of 3..." */
+    const char*              primary;   /**< Primary button label. */
+} ui_multisig_view_t;
+
+/**
+ * @param on_row_qr Row QR button.  The index is the cosigner, then one of the
+ *                  UI_MULTISIG_QR_* indices.
+ * @param on_primary The view's primary button.
+ * @param on_done Leaves the builder (the wallet is dropped).
+ */
+void ui_show_multisig(const ui_multisig_view_t* view, ui_uint_cb_t on_row_qr, ui_cb_t on_primary,
+                      ui_cb_t on_done);
+
+/**
+ * @brief Show a multi-part (animated) QR: @p payloads are shown in turn.
+ *
+ * Each part is encoded when its turn comes, so the screen only ever holds one
+ * grid.  Used for BC-UR multi-part export, where a receiver scans until it has
+ * enough parts.  ui_seedqr_cleanup() stops the animation as well as freeing the
+ * image.
+ *
+ * @param caption Optional line under the title.
+ * @param warning Optional red line (private material).
+ * @param on_done Done button.
+ */
+void ui_show_qr_anim(const char* title, const char* const* payloads, size_t count,
+                     const char* caption, const char* warning, ui_cb_t on_done);
 
 void ui_seedqr_cleanup(void);
 void ui_show_qr_scan_auto(ui_cb_t on_cancel, const char* title, ui_cb_t on_open_file,
@@ -273,6 +329,13 @@ void ui_show_confirm(const char* title, const char* msg, const char* yes_label,
  */
 void ui_show_choice(const char* title, const char* msg, const char* const* options, size_t count,
                     ui_uint_cb_t on_choice, ui_cb_t on_cancel);
+/**
+ * @brief As ui_show_choice(), but the options are small buttons that wrap into
+ *        a grid, so a long range (2..15 keys) fits on one screen.
+ */
+void ui_show_choice_compact(const char* title, const char* msg, const char* const* options,
+                            size_t count, ui_uint_cb_t on_choice, ui_cb_t on_cancel);
+
 void ui_show_mnemonic_error(ui_cb_t on_cancel, ui_cb_t on_retry, ui_cb_t on_choose);
 void ui_show_word_picker(const char* title, const char* const* words, size_t count,
                          ui_word_cb_t on_select, ui_cb_t on_back);

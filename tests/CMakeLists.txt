@@ -54,6 +54,7 @@ add_library(seedmix_test_util STATIC
     ${CMAKE_SOURCE_DIR}/main/crypto/touch.c
     ${CMAKE_SOURCE_DIR}/main/crypto/dice.c
     ${CMAKE_SOURCE_DIR}/main/crypto/keycheck.c
+    ${CMAKE_SOURCE_DIR}/main/crypto/multisig.c
     ${CMAKE_SOURCE_DIR}/main/crypto/coin.c
     support/fatal_stub.c
     support/hal_stub.c
@@ -120,6 +121,7 @@ seedmix_add_test(seedmix_seedqr_tests         test_seedqr.c)
 seedmix_add_test(seedmix_qr_tests             test_qr.c)
 seedmix_add_test(seedmix_txinspect_tests      test_txinspect.c)
 seedmix_add_test(seedmix_keycheck_tests       test_keycheck.c)
+seedmix_add_test(seedmix_multisig_tests       test_multisig.c)
 seedmix_add_test(seedmix_descriptor_tests     test_descriptor.c)
 seedmix_add_test(seedmix_ur_descriptor_tests  test_ur_descriptor.c)
 seedmix_add_test(seedmix_ur_tests             test_ur.c)

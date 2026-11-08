@@ -9,9 +9,11 @@
 #include "crypto/dice.h"
 #include "crypto/keycheck.h"
 #include "crypto/mnemonic.h"
+#include "crypto/multisig.h"
 #include "crypto/seedqr.h"
 #include "crypto/touch.h"
 #include "crypto/txinspect.h"
+#include "crypto/ur.h"
 #include "crypto/ur_descriptor.h"
 #include "crypto/ur_psbt.h"
 #include "hal.h"
@@ -100,6 +102,25 @@ static void on_descriptor_overview_cancel(void);
 static void start_tx_scan(void);
 static void on_seedqr_export(void);
 static void on_export_done(void);
+static void on_multisig(lv_event_t* e);
+static void on_ms_keys(uint8_t index);
+static void on_ms_threshold(uint8_t index);
+static void on_ms_network(uint8_t index);
+static void on_ms_threshold_restart(void);
+static void on_ms_export_anim(void);
+static void on_ms_export_choice(void);
+static void on_ms_export_kind(uint8_t index);
+static void on_ms_add_cosigner(void);
+static void on_ms_row_qr(uint8_t index);
+static void on_ms_counts_back(void);
+static void on_ms_slot_source(uint8_t option);
+static void on_ms_words_done(void);
+static void on_ms_words_cancel(void);
+static void on_ms_scan_start(void);
+static void on_ms_scan_cancel(void);
+static bool on_ms_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen);
+static void on_ms_show_qr(void);
+static void on_ms_leave(void);
 static void on_dice_rolls(void);
 static void on_coin_flips(void);
 static void on_dice_roll(uint8_t value);
@@ -1955,6 +1976,495 @@ static void on_finish(void) {
     ui_log_add("finished");
 }
 
+/* -- Multisig wallet builder ------------------------------------------ */
+/* Cosigners are entered one at a time - scanned as a SeedQR when a camera is
+ * available, otherwise typed - and each derivation runs on the background task
+ * with a spinner, because one BIP39 stretch takes seconds on a small MCU. The
+ * wallet screen is the hub: it shows what is known so far and asks for the next
+ * key. Nothing is stored: the wallet only lives in RAM while its screen is up. */
+enum { MS_MIN_KEYS = 2, MS_MAX_KEYS = 15 };
+/* Keep the spinner up long enough to be seen on a fast host. */
+#define MS_MIN_SPINNER_MS 1000
+
+static multisig_t*        ms_wallet;
+static size_t             ms_keys;      /* cosigners the wallet was started with */
+static size_t             ms_threshold; /* signatures needed to spend */
+static size_t             ms_slot;      /* cosigner being entered */
+static multisig_network_t ms_network = MULTISIG_MAINNET;
+static unsigned           ms_words; /* 12 or 24, for the typing screens */
+static char               ms_title[40];
+static const char*        ms_options[MS_MAX_KEYS];
+static char               ms_option_text[MS_MAX_KEYS][32];
+static char               ms_descriptor_text[MULTISIG_DESCRIPTOR_MAX];
+static char               ms_cosigner_text[MULTISIG_XPUB_MAX + 64];
+static char               ms_summary_text[48];
+static char               ms_progress_text[48];
+static char               ms_busy_text[48];
+static char               ms_address[MULTISIG_ADDR_MAX];
+static char               ms_change[MULTISIG_ADDR_MAX];
+static ui_multisig_row_t  ms_rows[MS_MAX_KEYS];
+static char               ms_row_value[MS_MAX_KEYS][MULTISIG_PATH_MAX + 32];
+
+/* The one derivation job. The worker owns the words until ms_finish_job(). */
+static char*                 ms_job_words;
+static size_t                ms_job_slot;
+static multisig_set_result_t ms_job_result;
+static size_t                ms_job_duplicate; /* slot with the same seed */
+static volatile bool         ms_job_done;
+static lv_timer_t*           ms_timer; /* polls the background job */
+static uint32_t              ms_job_start;
+static bool                  ms_leave_pending; /* Done tapped while a key was deriving */
+
+/* Multi-part UR export: the descriptor as a series of animatable parts. */
+enum { MS_UR_PARTS_MAX = 64, MS_UR_FRAGMENT = 80 };
+static char*  ms_ur_parts[MS_UR_PARTS_MAX];
+static size_t ms_ur_count;
+
+static char* ms_dup(const char* s) {
+    const size_t n    = strlen(s) + 1;
+    char*        copy = malloc(n);
+    if (copy) memcpy(copy, s, n);
+    return copy;
+}
+
+static void ms_words_free(char** words) {
+    if (!*words) return;
+    secure_memzero(*words, strlen(*words));
+    free(*words);
+    *words = NULL;
+}
+
+static void ms_ur_free(void) {
+    for (size_t i = 0; i < ms_ur_count; i++) {
+        free(ms_ur_parts[i]);
+        ms_ur_parts[i] = NULL;
+    }
+    ms_ur_count = 0;
+}
+
+static void ms_free(void) {
+    if (ms_timer) {
+        lv_timer_delete(ms_timer);
+        ms_timer = NULL;
+    }
+    ms_words_free(&ms_job_words);
+    ms_ur_free();
+    multisig_free(ms_wallet);
+    ms_wallet        = NULL;
+    ms_leave_pending = false;
+    ms_keys          = 0;
+    ms_threshold     = 0;
+    ms_slot          = 0;
+    secure_memzero(ms_descriptor_text, sizeof(ms_descriptor_text));
+    secure_memzero(ms_cosigner_text, sizeof(ms_cosigner_text));
+    secure_memzero(ms_address, sizeof(ms_address));
+    secure_memzero(ms_change, sizeof(ms_change));
+    secure_memzero(ms_row_value, sizeof(ms_row_value));
+}
+
+/* Cancel from anywhere in the builder: drop the keys and go back to the menu.
+ * The worker writes into the wallet, so a leave during a derivation waits for
+ * it to finish rather than freeing the wallet under it. */
+static void on_ms_leave(void) {
+    if (ms_timer) {
+        ms_leave_pending = true;
+        return;
+    }
+    ms_free();
+    ui_go_main();
+}
+
+/* -- Deriving one cosigner in the background --------------------------- */
+static void on_ms_add_cosigner(void);
+static void ms_job_failed(void);
+static void ms_refresh(void);
+static void ms_derive_worker(void* arg) {
+    (void)arg;
+    ms_job_result = multisig_set_words_ex(ms_wallet, ms_job_slot, ms_job_words, &ms_job_duplicate);
+    __sync_synchronize();
+    ms_job_done = true;
+}
+
+/* A refused cosigner asks for the words again rather than dropping the whole
+ * wallet. The usual cause is a seed phrase typed or scanned that is already one
+ * of the wallet's other cosigners. */
+static void ms_job_failed(void) {
+    static char message[80];
+
+    if (ms_job_result == MULTISIG_SET_DUPLICATE_KEY && ms_job_duplicate < ms_keys) {
+        snprintf(message, sizeof(message), "That seed phrase is already cosigner %u.",
+                 (unsigned)(ms_job_duplicate + 1));
+        ui_show_confirm("Key Already Used", message, "Enter again", "Cancel", on_ms_add_cosigner,
+                        on_ms_leave);
+        return;
+    }
+    ui_show_confirm("Invalid seed phrase", "Those words do not pass the BIP39 checksum.",
+                    "Enter again", "Cancel", on_ms_add_cosigner, on_ms_leave);
+}
+
+static void ms_finish_job(void) {
+    __sync_synchronize();
+    ms_job_done = false;
+    if (ms_timer) {
+        lv_timer_delete(ms_timer);
+        ms_timer = NULL;
+    }
+    ms_words_free(&ms_job_words);
+    if (ms_leave_pending) {
+        ms_leave_pending = false;
+        ms_free();
+        ui_go_main();
+        return;
+    }
+    if (ms_job_result != MULTISIG_SET_OK) {
+        ms_job_failed();
+        return;
+    }
+    ms_slot++;
+    ms_refresh();
+}
+
+static void ms_poll_cb(lv_timer_t* t) {
+    (void)t;
+    if (!ms_job_done) return;
+    /* Fast hosts finish sooner than the spinner can be seen. */
+    if (lv_tick_elaps(ms_job_start) < MS_MIN_SPINNER_MS) return;
+    ms_finish_job();
+}
+
+static void ms_start_derive(size_t slot, const char* words) {
+    ASSERT_OR_DIE(ms_wallet && words && words[0], "no cosigner words to derive");
+    ASSERT_OR_DIE(ms_timer == NULL, "a cosigner derivation is already running");
+
+    ms_words_free(&ms_job_words);
+    ms_job_words = ms_dup(words);
+    ASSERT_OR_DIE(ms_job_words, "out of memory");
+    ms_job_slot      = slot;
+    ms_job_result    = MULTISIG_SET_OK;
+    ms_job_duplicate = SIZE_MAX;
+    ms_job_done      = false;
+    ms_job_start     = lv_tick_get();
+    snprintf(ms_busy_text, sizeof(ms_busy_text), "Deriving cosigner %u of %u...",
+             (unsigned)(slot + 1), (unsigned)ms_keys);
+
+    if (hal_work_start(ms_derive_worker, NULL)) {
+        ms_timer = lv_timer_create(ms_poll_cb, 50, NULL);
+        ASSERT_OR_DIE(ms_timer, "could not create the derivation timer");
+        ms_refresh();
+        return;
+    }
+
+    /* No background task on this platform: paint the spinner, do the work here
+     * and leave the spinner up for its minimum time. */
+    ms_refresh();
+    lv_refr_now(NULL);
+    ms_derive_worker(NULL);
+    const uint32_t elapsed = lv_tick_elaps(ms_job_start);
+    if (elapsed < MS_MIN_SPINNER_MS) ui_delay_ms(MS_MIN_SPINNER_MS - elapsed);
+    ms_finish_job();
+}
+
+/* -- The wallet screen ------------------------------------------------- */
+static void on_ms_export_choice(void);
+static void on_ms_show_qr(void);
+static void on_ms_row_qr(uint8_t index);
+
+/* Build the view from the wallet's current state and show it. */
+static void ms_refresh(void) {
+    if (!ms_wallet) return;
+
+    const char* net   = ms_network == MULTISIG_TESTNET ? "testnet" : "mainnet";
+    size_t      ready = 0;
+    for (size_t i = 0; i < ms_keys; i++) {
+        if (multisig_slot_ready(ms_wallet, i)) {
+            snprintf(ms_row_value[i], sizeof(ms_row_value[i]), "Cosigner %u  %s  %s",
+                     (unsigned)(i + 1), multisig_slot_fingerprint(ms_wallet, i),
+                     multisig_slot_path(ms_wallet, i));
+            ms_rows[i].ready = true;
+            ready++;
+        } else {
+            snprintf(ms_row_value[i], sizeof(ms_row_value[i]), "Cosigner %u  not set yet",
+                     (unsigned)(i + 1));
+            ms_rows[i].ready = false;
+        }
+        ms_rows[i].label = NULL;
+        ms_rows[i].value = ms_row_value[i];
+    }
+
+    const bool complete = multisig_complete(ms_wallet);
+    snprintf(ms_summary_text, sizeof(ms_summary_text), "%u of %u  (%s)", (unsigned)ms_threshold,
+             (unsigned)ms_keys, net);
+    snprintf(ms_progress_text, sizeof(ms_progress_text), "keys entered: %u of %u", (unsigned)ready,
+             (unsigned)ms_keys);
+
+    ms_address[0]         = '\0';
+    ms_change[0]          = '\0';
+    ms_descriptor_text[0] = '\0';
+    if (complete) {
+        multisig_descriptor(ms_wallet, ms_descriptor_text, sizeof(ms_descriptor_text));
+        multisig_address(ms_wallet, 0, 0, ms_address, sizeof(ms_address));
+        multisig_address(ms_wallet, 1, 0, ms_change, sizeof(ms_change));
+    }
+    ui_multisig_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.summary    = ms_summary_text;
+    view.progress   = complete ? NULL : ms_progress_text;
+    view.descriptor = complete ? ms_descriptor_text : NULL;
+    view.address    = complete ? ms_address : NULL;
+    view.change     = complete ? ms_change : NULL;
+    view.rows       = ms_rows;
+    view.row_count  = ms_keys;
+    view.busy       = ms_timer != NULL;
+    view.busy_text  = ms_busy_text;
+    view.primary    = complete ? "Export" : (view.busy ? "Deriving..." : "Add cosigner");
+
+    ui_show_multisig(&view, on_ms_row_qr, complete ? on_ms_export_choice : on_ms_add_cosigner,
+                     on_ms_leave);
+}
+
+/* Every row of the wallet screen can export itself: a cosigner's key, the
+ * descriptor, and the wallet's first receive and change addresses. */
+static void on_ms_row_qr(uint8_t index) {
+    if (!ms_wallet) return;
+
+    const char* title = "Cosigner Key";
+    const char* text  = ms_cosigner_text;
+    char        caption[64];
+    if (index < ms_keys) {
+        if (!multisig_slot_ready(ms_wallet, index)) return;
+        if (multisig_cosigner_key(ms_wallet, index, ms_cosigner_text, sizeof(ms_cosigner_text)) ==
+            0)
+            return;
+        snprintf(caption, sizeof(caption), "cosigner %u\n%s", (unsigned)(index + 1),
+                 multisig_slot_fingerprint(ms_wallet, index));
+    } else {
+        switch (index) {
+        case UI_MULTISIG_QR_DESCRIPTOR:
+            if (!ms_descriptor_text[0]) return;
+            title = "Descriptor";
+            text  = ms_descriptor_text;
+            snprintf(caption, sizeof(caption), "%u of %u\nwsh(sortedmulti)", (unsigned)ms_threshold,
+                     (unsigned)ms_keys);
+            break;
+        case UI_MULTISIG_QR_RECEIVE:
+            if (!ms_address[0]) return;
+            title = "Receive Address";
+            text  = ms_address;
+            snprintf(caption, sizeof(caption), "receive  m/0/0");
+            break;
+        case UI_MULTISIG_QR_CHANGE:
+            if (!ms_change[0]) return;
+            title = "Change Address";
+            text  = ms_change;
+            snprintf(caption, sizeof(caption), "change  m/1/0");
+            break;
+        default:
+            return;
+        }
+    }
+
+    if (!qr_encode((const uint8_t*)text, strlen(text), QR_MODE_BYTE, &exported_qr))
+        FATAL("multisig row QR encode failed");
+
+    export_return = ms_refresh;
+    ui_show_qr(title, exported_qr.cells, exported_qr.size, caption, NULL, on_export_done);
+}
+
+/* -- Entering one cosigner -------------------------------------------- */
+static void on_ms_add_cosigner(void) {
+    if (ms_timer) return; /* a derivation is running: ignore the tap */
+    ASSERT_OR_DIE(ms_wallet && ms_slot < ms_keys, "no cosigner slot to fill");
+    snprintf(ms_title, sizeof(ms_title), "Cosigner %u of %u", (unsigned)(ms_slot + 1),
+             (unsigned)ms_keys);
+
+    const char* options[3];
+    size_t      n = 0;
+    if (hal_camera_available()) options[n++] = "Scan SeedQR";
+    options[n++] = "Type 12 words";
+    options[n++] = "Type 24 words";
+
+    ui_show_choice(ms_title, "Enter this cosigner's seed phrase", options, n, on_ms_slot_source,
+                   ms_refresh);
+}
+
+static void on_ms_slot_source(uint8_t option) {
+    size_t i = 0;
+    if (hal_camera_available() && option == i++) {
+        on_ms_scan_start();
+        return;
+    }
+    ms_words  = (option == i) ? 12 : 24;
+    we_handle = ui_word_entry_begin(ms_words, on_ms_words_done, on_ms_words_cancel, NULL);
+}
+
+static void on_ms_words_cancel(void) {
+    ui_word_entry_discard(we_handle);
+    we_handle = NULL;
+    ms_refresh();
+}
+
+static void on_ms_words_done(void) {
+    const char* words = ui_word_entry_result(we_handle);
+    ASSERT_OR_DIE(words && words[0], "no words entered");
+    ms_start_derive(ms_slot, words);
+    ui_word_entry_discard(we_handle);
+    we_handle = NULL;
+}
+
+static void on_ms_scan_start(void) {
+    if (!hal_camera_available()) FATAL("Camera not available.");
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb     = on_ms_seedqr_payload;
+    qr_scan_title  = ms_title;
+    qr_scan_cancel = on_ms_scan_cancel;
+    qr_scan_help   = NULL;
+    qr_scan_screen_show();
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_ms_scan_cancel(void) {
+    camera_feed_stop();
+    ms_refresh();
+}
+
+/* A SeedQR of the next cosigner's seed phrase. */
+static bool on_ms_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    (void)source;
+    mnemonic_t* m = NULL;
+
+    if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
+        char digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        memcpy(digits, payload, plen);
+        digits[plen] = '\0';
+        m            = seedqr_standard_decode(digits);
+        secure_memzero(digits, sizeof(digits));
+    } else if (plen == 16 || plen == 32) {
+        m = seedqr_compact_decode(payload, plen);
+    }
+    if (!m) return false; /* not a SeedQR: keep looking */
+
+    camera_feed_stop();
+    const char* words = mnemonic_words(m);
+    ASSERT_OR_DIE(words && words[0], "scanned mnemonic has no words");
+    ms_start_derive(ms_slot, words);
+    mnemonic_discard(m);
+    return true;
+}
+
+/* -- Starting a wallet ------------------------------------------------- */
+static void on_multisig(lv_event_t* e) {
+    (void)e;
+    ms_free();
+
+    static const char* const keys[MS_MAX_KEYS - MS_MIN_KEYS + 1] = {
+        "2 keys", "3 keys",  "4 keys",  "5 keys",  "6 keys",  "7 keys",  "8 keys",
+        "9 keys", "10 keys", "11 keys", "12 keys", "13 keys", "14 keys", "15 keys"};
+    ui_show_choice_compact("Build Multisig", "How many keys does the wallet have?", keys,
+                           sizeof(keys) / sizeof(keys[0]), on_ms_keys, on_ms_leave);
+}
+
+static void on_ms_keys(uint8_t index) {
+    ms_keys = (size_t)index + MS_MIN_KEYS;
+
+    for (size_t i = 0; i < ms_keys; i++) {
+        snprintf(ms_option_text[i], sizeof(ms_option_text[i]), "%u of %u", (unsigned)(i + 1),
+                 (unsigned)ms_keys);
+        ms_options[i] = ms_option_text[i];
+    }
+    ui_show_choice_compact("Build Multisig", "How many signatures are needed to spend?", ms_options,
+                           ms_keys, on_ms_threshold, on_ms_counts_back);
+}
+
+static void on_ms_counts_back(void) { on_multisig(NULL); }
+
+static void on_ms_threshold_restart(void) { on_ms_keys((uint8_t)(ms_keys - MS_MIN_KEYS)); }
+
+static void on_ms_threshold(uint8_t index) {
+    ms_threshold = (size_t)index + 1;
+
+    static const char* const networks[] = {"Mainnet", "Testnet"};
+    ui_show_choice_compact("Build Multisig", "Which network is the wallet on?", networks, 2,
+                           on_ms_network, on_ms_threshold_restart);
+}
+
+static void on_ms_network(uint8_t index) {
+    const multisig_network_t network = index == 1 ? MULTISIG_TESTNET : MULTISIG_MAINNET;
+    ms_wallet                        = multisig_new(ms_keys, ms_threshold, network);
+    ASSERT_OR_DIE(ms_wallet, "could not start the multisig wallet");
+    ms_slot    = 0;
+    ms_network = network;
+    ms_refresh();
+}
+
+/* -- Export ----------------------------------------------------------- */
+static void on_ms_export_choice(void) {
+    static const char* const options[] = {"Single QR", "Animated QR (UR)"};
+    ui_show_choice("Export Descriptor",
+                   "A multisig descriptor is dense; the animated code is easier to scan.", options,
+                   sizeof(options) / sizeof(options[0]), on_ms_export_kind, ms_refresh);
+}
+
+/* BC-UR multi-part export: the descriptor map, cut into fountain parts that a
+ * receiving wallet collects over successive frames. */
+static void on_ms_export_anim(void) {
+    const size_t len =
+        multisig_descriptor(ms_wallet, ms_descriptor_text, sizeof(ms_descriptor_text));
+    if (len == 0) FATAL("multisig descriptor failed");
+
+    uint8_t* cbor     = NULL;
+    size_t   cbor_len = 0;
+    if (!ur_descriptor_encode(ms_descriptor_text, &cbor, &cbor_len))
+        FATAL("UR descriptor encode failed");
+
+    const size_t count = ur_multipart_count(cbor_len, MS_UR_FRAGMENT);
+    if (count == 0 || count > MS_UR_PARTS_MAX) {
+        free(cbor);
+        FATAL("multisig descriptor needs too many UR parts");
+    }
+
+    ms_ur_free();
+    for (size_t i = 0; i < count; i++) {
+        char* part = NULL;
+        if (!ur_multipart_encode_part("output-descriptor", cbor, cbor_len, MS_UR_FRAGMENT,
+                                      (uint32_t)(i + 1), &part)) {
+            free(cbor);
+            ms_ur_free();
+            FATAL("UR part encode failed");
+        }
+        ms_ur_parts[i] = part;
+        ms_ur_count    = i + 1;
+    }
+    free(cbor);
+
+    export_return = ms_refresh;
+    ui_show_qr_anim("Descriptor", (const char* const*)ms_ur_parts, ms_ur_count,
+                    "BC-UR\noutput-descriptor", NULL, on_export_done);
+}
+
+static void on_ms_export_kind(uint8_t index) {
+    if (index == 0) {
+        on_ms_show_qr();
+        return;
+    }
+    on_ms_export_anim();
+}
+
+static void on_ms_show_qr(void) {
+    const size_t len =
+        multisig_descriptor(ms_wallet, ms_descriptor_text, sizeof(ms_descriptor_text));
+    if (len == 0) FATAL("multisig descriptor failed");
+    if (!qr_encode((const uint8_t*)ms_descriptor_text, len, QR_MODE_BYTE, &exported_qr))
+        FATAL("multisig descriptor encode failed");
+
+    char caption[64];
+    snprintf(caption, sizeof(caption), "%u of %u\nwsh(sortedmulti)", (unsigned)ms_threshold,
+             (unsigned)ms_keys);
+
+    export_return = ms_refresh;
+    ui_show_qr("Descriptor", exported_qr.cells, exported_qr.size, caption, NULL, on_export_done);
+}
+
 /* -- Entry: "Create Mnemonic Seed" button --------------------------------------- */
 static void on_create_mnemonic(lv_event_t* e) {
     (void)e;
@@ -1971,7 +2481,7 @@ static void on_test_error(lv_event_t* e) {
 
 /* -- Initialization --------------------------------------------------- */
 static void show_main_screen(void) {
-    ui_show_main(on_create_mnemonic, on_inspect_tx, on_test_error);
+    ui_show_main(on_create_mnemonic, on_inspect_tx, on_multisig, on_test_error);
 }
 
 void app_init(void) {

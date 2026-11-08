@@ -665,6 +665,41 @@ static bool decode_message(const uint8_t* cbor, size_t cbor_len, char** out_desc
     return true;
 }
 
+bool ur_descriptor_encode(const char* text, uint8_t** out_cbor, size_t* out_len) {
+    if (out_cbor) *out_cbor = NULL;
+    if (out_len) *out_len = 0;
+    if (!text || !out_cbor || !out_len) return false;
+
+    const size_t n = strlen(text);
+    if (n == 0 || n > UR_DESC_MAX) return false;
+
+    /* {1: text} - map of one pair, integer key 1, major type 3 string. */
+    const size_t text_head = n < 24 ? 1 : n <= 0xFF ? 2 : 3;
+    const size_t total     = 2 + text_head + n;
+    uint8_t*     cbor      = malloc(total);
+    if (!cbor) return false;
+
+    size_t o  = 0;
+    cbor[o++] = 0xA1;
+    cbor[o++] = 0x01;
+    if (n < 24) {
+        cbor[o++] = (uint8_t)(0x60 | n);
+    } else if (n <= 0xFF) {
+        cbor[o++] = 0x78;
+        cbor[o++] = (uint8_t)n;
+    } else {
+        cbor[o++] = 0x79;
+        cbor[o++] = (uint8_t)(n >> 8);
+        cbor[o++] = (uint8_t)n;
+    }
+    memcpy(cbor + o, text, n);
+    o += n;
+
+    *out_cbor = cbor;
+    *out_len  = o;
+    return true;
+}
+
 bool ur_descriptor_decode(const char* ur, size_t ur_len, char** out_descriptor) {
     if (out_descriptor) *out_descriptor = NULL;
     if (!ur || !out_descriptor) return false;
