@@ -68,3 +68,7 @@ set(SHARED_APP_SOURCES
     "${SHARED_MAIN_DIR}/util/utils.c"
 )
 target_sources(${COMPONENT_LIB} PRIVATE ${SHARED_APP_SOURCES})
+
+# The commit and date the firmware was built from, shown on the main screen.
+include(${CMAKE_CURRENT_LIST_DIR}/../../../cmake/BuildInfo.cmake)
+seedmix_build_info(${COMPONENT_LIB})

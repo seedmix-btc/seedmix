@@ -8,6 +8,7 @@
 #include "assets/splash_240x135_img.h"
 #include "assets/splash_480x320_img.h"
 #include "bitvis.h"
+#include "build_info.h"
 #include "dice.h"
 #include "hal.h"
 #include "mnemonic_view.h"
@@ -482,6 +483,14 @@ void ui_show_main(lv_event_cb_t on_new_wallet, lv_event_cb_t on_inspect_tx,
         lv_obj_set_size(logo, ui_scale(157), ui_scale(40));
         lv_image_set_inner_align(logo, LV_IMAGE_ALIGN_STRETCH);
         lv_obj_align(logo, LV_ALIGN_TOP_LEFT, ui_scale(10), ui_scale(10));
+
+        /* Which commit (and build date) this is */
+        lv_obj_t* stamp = lv_label_create(scr);
+        lv_label_set_text(stamp, SEEDMIX_BUILD_STAMP);
+        lv_obj_set_style_text_color(stamp, lv_color_hex(0x808080), 0);
+        lv_obj_set_style_text_font(stamp, ui_font(12), 0);
+        lv_obj_set_style_text_align(stamp, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(stamp, LV_ALIGN_TOP_RIGHT, ui_scale(-10), ui_scale(10));
 
         // Three hero buttons when there is a camera to scan with, two without.
         const bool camera = hal_camera_available();

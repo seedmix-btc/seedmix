@@ -71,6 +71,11 @@ else()
     include(${CMAKE_SOURCE_DIR}/platform/linux/linux.cmake)
 endif()
 
+# Stamp the executable with the commit it came from (both platforms create the
+# same ${PROJECT_NAME} target above).
+include(BuildInfo)
+seedmix_build_info(${PROJECT_NAME})
+
 # -- Tests -------------------------------------------------------------------
 if(BUILD_TESTS)
     if(PLATFORM STREQUAL "linux")
