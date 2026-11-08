@@ -42,6 +42,10 @@ for camera when a webcam is available.
 ./scripts/build_web.sh serve
 ```
 
+`serve` builds and then serves. Builds are incremental — only the sources that
+changed are recompiled, and libwally is only re-extracted and reconfigured when
+its pinned revision changes — so an up-to-date tree costs about a second.
+
 On first run the script downloads the Emscripten toolchain (~500 MB) into
 `external/emsdk` and installs version 6.0.9.  Set `EMSDK=/path/to/emsdk` to
 reuse an SDK you've already installed.

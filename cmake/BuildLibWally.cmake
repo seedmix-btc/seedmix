@@ -29,30 +29,35 @@ endif()
 # is not viable because the Linux build leaves in-source artifacts
 # (config.status, *.la) in the shared source tree, which confuse make's VPATH
 # search.  `git archive` produces a clean tree with no build artifacts.
+# Both platforms configure through scripts/configure_libwally.sh, which only
+# redoes the destructive part (wipe + `git archive` extract + autogen +
+# configure) when the revision or install prefix actually changed.  An
+# ExternalProject's configure step re-runs whenever CMake regenerates its build
+# files - i.e. on every reconfigure - and doing the wipe there threw away all of
+# libwally's and secp256k1's objects each time.
 if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
     set(LIBWALLY_MAKE_WRAPPER emmake)
     set(LIBWALLY_BUILD_DIR ${CMAKE_BINARY_DIR}/libwally-src)
     set(LIBWALLY_EXTRA_ARGS BINARY_DIR ${LIBWALLY_BUILD_DIR})
     set(LIBWALLY_BUILD_IN_SOURCE 0)
-    # Populate the (empty) binary dir with a pristine libwally tree via git
-    # archive, then configure it in-place there.  This avoids both the shared
+    # A pristine tree in the build dir via git archive avoids both the shared
     # in-source artifacts and make's VPATH search seeing stale *.la files.
-    set(LIBWALLY_CONFIGURE_COMMAND
-        bash -c "cd ${LIBWALLY_BUILD_DIR} && find . -mindepth 1 -delete && git -C ${LIBWALLY_SOURCE_DIR} archive HEAD | tar -x -C . && mkdir -p src/secp256k1 && git -C ${LIBWALLY_SOURCE_DIR}/src/secp256k1 archive HEAD | tar -x -C src/secp256k1 && ./tools/autogen.sh && emconfigure ./configure --prefix=${LIBWALLY_INSTALL_DIR} --enable-static --disable-shared --disable-elements --enable-standard-secp")
+    set(LIBWALLY_MODE emscripten)
 else()
     set(LIBWALLY_MAKE_WRAPPER "")
     set(LIBWALLY_EXTRA_ARGS)
     set(LIBWALLY_BUILD_IN_SOURCE 1)
-    set(LIBWALLY_CONFIGURE_COMMAND
-        cd ${LIBWALLY_SOURCE_DIR}
-        COMMAND ./tools/autogen.sh
-        COMMAND ./configure
-            --prefix=${LIBWALLY_INSTALL_DIR}
-            --enable-static
-            --disable-shared
-            --disable-elements
-            --enable-standard-secp)
+    set(LIBWALLY_BUILD_DIR ${LIBWALLY_SOURCE_DIR})
+    set(LIBWALLY_MODE native)
 endif()
+
+set(LIBWALLY_CONFIGURE_COMMAND
+    ${CMAKE_SOURCE_DIR}/scripts/configure_libwally.sh
+        ${LIBWALLY_SOURCE_DIR}
+        ${LIBWALLY_BUILD_DIR}
+        ${LIBWALLY_INSTALL_DIR}
+        ${LIBWALLY_MODE}
+        ${CMAKE_BINARY_DIR}/libwally-configured.stamp)
 
 ExternalProject_Add(libwally_ext
     ${LIBWALLY_EXTRA_ARGS}
