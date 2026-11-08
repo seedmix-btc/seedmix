@@ -116,6 +116,8 @@ Both boards build hardened:
 - `libwally`, `qrencode` and `quirc` built as ESP-IDF components from the
   vendored sources in `external/`, and the shared app sources compiled into
   the `main` component.
+- Hardware SHA-512: the libwally component defines `HAVE_MBEDTLS_SHA512_H`, so
+  libwally's bundled ccan SHA-512 calls mbedtls.
 - Boot selection: hold a button during boot to show the hardware debug screen,
   otherwise the normal application (`app_init`) runs.
 
