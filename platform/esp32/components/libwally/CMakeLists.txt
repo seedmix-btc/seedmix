@@ -9,7 +9,10 @@
 
 set(WALLY_DIR "${COMPONENT_DIR}/../../../..//external/libwally-core")
 
-idf_component_register(SRCS "")
+# mbedtls is required for the hardware SHA-512 engine: config.h defines
+# HAVE_MBEDTLS_SHA512_H so ccan's SHA-512 calls
+# mbedtls_sha512_* instead of the portable C round loop.
+idf_component_register(SRCS "" REQUIRES mbedtls)
 
 # -- Bundled secp256k1 ------------------------------------------------
 # Standard module set: ecdh/recovery/extrakeys/schnorrsig are the only ones
@@ -72,7 +75,18 @@ target_include_directories(wallycore
         "${WALLY_DIR}/src/ccan"
         "${WALLY_DIR}/src/secp256k1/include"
 )
-target_link_libraries(wallycore PUBLIC secp256k1)
+# PRIVATE: only wallycore's own sources need the mbedtls headers, and the
+# engine's symbols come along when the component is linked.  The include dirs
+# are taken from the component property because IDF only feeds them to its own
+# component targets, not to a plain library like wallycore.
+target_link_libraries(wallycore PUBLIC secp256k1 PRIVATE mbedtls)
+# The component's public include dirs are relative paths, so anchor them on the
+# component itself: port/include holds esp_config.h and sha512_alt.h.
+idf_component_get_property(mbedtls_dir mbedtls COMPONENT_DIR)
+target_include_directories(wallycore PRIVATE
+    "${mbedtls_dir}/port/include"
+    "${mbedtls_dir}/mbedtls/include"
+    "${mbedtls_dir}/mbedtls/library")
 
 # Expose wallycore (and transitively secp256k1) to components that require
 # this component.

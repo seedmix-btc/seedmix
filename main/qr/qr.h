@@ -31,6 +31,18 @@ bool qr_encode(const uint8_t* data, size_t len, qr_mode_t mode, qr_grid_t* out);
 void qr_grid_free(qr_grid_t* g);
 
 /**
+ * Largest image side accepted by qr_decode().
+ *
+ * Images read from a file (screenshots, photos) can be much larger than a
+ * camera frame, so platform code that loads them must downscale to this limit
+ * before calling qr_decode().
+ */
+#define QR_DECODE_SIDE_MAX 1024u
+
+/** Largest image (width * height) accepted by qr_decode(). */
+#define QR_DECODE_PIXELS_MAX ((size_t)QR_DECODE_SIDE_MAX * (size_t)QR_DECODE_SIDE_MAX)
+
+/**
  * @brief Decode a QR from a row-major grayscale image (1 byte/pixel).
  * @return true and writes the raw payload into @p payload on success.
  */

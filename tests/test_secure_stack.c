@@ -61,11 +61,21 @@ static void test_push_rejects_when_full(void) {
     secure_stack_destroy(s);
 }
 
+static void test_push_rejects_invalid_arguments(void) {
+    uint8_t buf = 1;
+    TEST_ASSERT_FALSE(secure_stack_push(NULL, &buf, 1));
+
+    secure_stack_t* s = secure_stack_create(1);
+    TEST_ASSERT_FALSE(secure_stack_push(s, NULL, 1));
+    secure_stack_destroy(s);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_create_and_count);
     RUN_TEST(test_push_pop_zeroes);
     RUN_TEST(test_lifo_order);
     RUN_TEST(test_push_rejects_when_full);
+    RUN_TEST(test_push_rejects_invalid_arguments);
     return UNITY_END();
 }

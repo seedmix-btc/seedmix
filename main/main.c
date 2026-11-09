@@ -5,10 +5,17 @@
 
 #include "app.h"
 #include "crypto/coin.h"
+#include "crypto/descriptor.h"
 #include "crypto/dice.h"
+#include "crypto/keycheck.h"
 #include "crypto/mnemonic.h"
+#include "crypto/multisig.h"
 #include "crypto/seedqr.h"
 #include "crypto/touch.h"
+#include "crypto/txinspect.h"
+#include "crypto/ur.h"
+#include "crypto/ur_descriptor.h"
+#include "crypto/ur_psbt.h"
 #include "hal.h"
 #include "lvgl.h"
 #include "qr/qr.h"
@@ -24,119 +31,278 @@
 #include <string.h>
 
 /* -- Workflow state --------------------------------------------------- */
-static mnemonic_t* current     = NULL;
-static unsigned    word_count  = 12;
-static qr_grid_t   exported_qr = {0};
+static uint8_t     current_entropy[32]; // the working seed (the first 16 or 32 bytes)
+static size_t      current_entropy_len = 0;
+static unsigned    word_count          = 12;
+static qr_grid_t   exported_qr         = {0};
+static mnemonic_t* final_mnemonic      = NULL; // the words, only while the final screen is up
+
+// Bring a mnemonic into existence only where words are really needed, and take
+// its entropy rather than keep it.
+static size_t mnemonic_take_entropy(mnemonic_t* m, uint8_t* out) {
+    if (!m) return 0;
+    const size_t elen = mnemonic_to_entropy(m, out);
+    mnemonic_discard(m);
+    return elen;
+}
+
+// Let the final screen's words go; discard() rejects a null mnemonic, and the
+// first time this runs there is nothing to let go of.
+static void final_mnemonic_wipe(void) {
+    if (final_mnemonic) mnemonic_discard(final_mnemonic);
+    final_mnemonic = NULL;
+}
 
 /* -- Forward declarations --------------------------------------------- */
+/* Where a decoded QR payload came from. The camera keeps streaming, so a
+ * payload the screen cannot use is quietly passed over; a file is read once,
+ * so the screen says so instead. */
+typedef enum {
+    QR_SOURCE_CAMERA = 0,
+    QR_SOURCE_FILE,
+} qr_source_t;
+
 static void on_other_source(void);
 static void on_camera_image(void);
 static void on_camera_use(void);
 static void on_camera_cancel(void);
+static void on_camera_help(void);
+static void on_camera_help_close(void);
+static void show_final_screen(void);
+static void on_verify_keys(void);
+static void on_keycheck_done(void);
+static void on_keycheck_tab(uint8_t index);
+static void on_row_qr(uint8_t row);
+static void kc_update(void);
+static void kc_refresh(void);
+static void kc_poll_cb(lv_timer_t* t);
+static void kc_finish_job(void);
+static void on_words_help(void);
+static void on_words_help_close(void);
 static void on_scan_qr(void);
-static void on_qr_scan(void);
+static void on_scan_file(void);
+static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen);
 static void on_qr_scan_cancel(void);
-static void on_export_seedqr(void);
+static void on_seedqr_help(void);
+static void on_seedqr_help_close(void);
+static bool qr_scan_deliver(qr_source_t source, const uint8_t* payload, size_t plen);
+static void qr_scan_poll_file(void);
+static void qr_scan_error(const char* msg);
+static void qr_scan_screen_show(void);
+static void on_inspect_tx(lv_event_t* e);
+static bool on_tx_payload(qr_source_t source, const uint8_t* payload, size_t plen);
+static bool on_descriptor_payload(qr_source_t source, const uint8_t* payload, size_t plen);
+static void on_inspect_tx_cancel(void);
+static void on_inspect_tx_done(void);
+static void on_descriptor_cancel(void);
+static void on_scan_descriptor(void);
+static void on_skip_descriptor(void);
+static void on_descriptor_overview_continue(void);
+static void on_descriptor_overview_cancel(void);
+static void start_tx_scan(void);
+static void on_seedqr_export(void);
 static void on_export_done(void);
+static void on_multisig(lv_event_t* e);
+static void on_ms_keys(uint8_t index);
+static void on_ms_threshold(uint8_t index);
+static void on_ms_network(uint8_t index);
+static void on_ms_threshold_restart(void);
+static void on_ms_export_anim(void);
+static void on_ms_export_choice(void);
+static void on_ms_export_kind(uint8_t index);
+static void on_ms_add_cosigner(void);
+static void on_ms_row_qr(uint8_t index);
+static void on_ms_counts_back(void);
+static void on_ms_slot_source(uint8_t option);
+static void on_ms_words_done(void);
+static void on_ms_words_cancel(void);
+static void on_ms_scan_start(void);
+static void on_ms_scan_cancel(void);
+static bool on_ms_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen);
+static void on_ms_show_qr(void);
+static void on_ms_leave(void);
 static void on_dice_rolls(void);
 static void on_coin_flips(void);
+static void on_dice_roll(uint8_t value);
+static void on_dice_cancel(void);
+static void on_coin_flip(uint8_t value);
+static void on_coin_cancel(void);
+static void on_dice_help(void);
+static void on_coin_help(void);
 static void on_touch_screen(void);
 static void on_touch_tap(lv_coord_t x, lv_coord_t y);
+static void on_touch_cancel(void);
+static void on_touch_help(void);
+static void on_touch_continue(void);
 static void on_show_state(void);
+static void on_words_help(void);
+static void on_words_help_close(void);
+static void on_generate_continue(void);
 static void go_back_source(void);
 static void go_source(void);
 static void on_finish(void);
 static void on_finish_done(void);
-static void show_merge_screen(mnemonic_t* new_m, const char* source_desc);
+static void show_merge_screen(const uint8_t* new_entropy, size_t elen, const char* source_desc);
+static void on_xor_help(void);
+static void on_xor_help_close(void);
 static void on_we_ok(void);
 static void on_we_error_cancel(void);
 static void on_we_error_retry(void);
 static void on_we_error_choose(void);
 static void on_we_word_selected(const char* word);
-static void on_new_wallet(lv_event_t* e);
+static void on_create_mnemonic(lv_event_t* e);
 static void on_test_error(lv_event_t* e);
+static void show_main_screen(void);
 
-static void on_generating_msg(const char* msg) {
-    ui_show_msg(msg);
-    ui_delay_ms(1500);
+// Show the working seed as raw entropy; the words are only shown at the final
+// stage. `source` names where the bytes came from, and is only used by the source
+// that started the seed.
+static void show_entropy_screen(const uint8_t* entropy, size_t elen, mnemonic_type_t type,
+                                const char* source, ui_cb_t on_ok) {
+    ASSERT_OR_DIE(entropy, "null entropy");
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+
+    char hex[2 * 32 + 1];
+    ASSERT_OR_DIE(bytes_to_hex(entropy, elen, hex, sizeof(hex)), "entropy hex buffer too small");
+    ui_show_entropy(hex, type, source, on_ok);
+    secure_memzero(hex, sizeof(hex)); // the screen keeps its own copy
 }
 
-// Combine `m` into `current` if the word counts match, otherwise discard `m`
-// and return to the source screen
-static void merge_or_reject(mnemonic_t* m, mnemonic_type_t result_type, const char* source_desc) {
-    if (current && mnemonic_entropy_size(current) != mnemonic_entropy_size(m)) {
-        ui_log_add("rejected %s: word count mismatch", source_desc);
-        mnemonic_discard(m);
-        ui_show_msg("Word count mismatch - mnemonic discarded");
+// Combine `entropy` into the working seed if the sizes match, otherwise drop it
+// and return to the source screen.
+static void merge_or_reject(const uint8_t* entropy, size_t elen, mnemonic_type_t result_type,
+                            const char* source_desc, const char* source_name) {
+    ASSERT_OR_DIE(entropy, "null source entropy");
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected source entropy length");
+
+    if (current_entropy_len && current_entropy_len != elen) {
+        ui_log_add("rejected %s: bit count mismatch", source_desc);
+        ui_show_msg("Seed size mismatch - input discarded");
         ui_delay_ms(1500);
         go_source();
         return;
     }
-    if (current) {
-        show_merge_screen(m, source_desc);
-    } else {
-        current = m;
-        ui_log_add("started with %s", source_desc);
-        ui_show_mnemonic(mnemonic_words(current), result_type, go_source, NULL);
+    if (current_entropy_len) {
+        // XORing a source with the seed already in use leaves an all-zero seed
+        bool same = true;
+        for (size_t i = 0; i < elen; i++) {
+            if (current_entropy[i] != entropy[i]) {
+                same = false;
+                break;
+            }
+        }
+        if (same) {
+            ui_log_add("rejected %s: same as the working seed", source_desc);
+            ui_show_msg("Same seed as the one in use - input discarded");
+            ui_delay_ms(1500);
+            go_source();
+            return;
+        }
+        show_merge_screen(entropy, elen, source_desc);
+        return;
     }
+    memcpy(current_entropy, entropy, elen);
+    current_entropy_len = elen;
+    ui_log_add("started with %s", source_desc);
+    show_entropy_screen(current_entropy, current_entropy_len, result_type, source_name, go_source);
 }
 
+// Generating has nothing to collect, so the page that explains where the bytes
+// come from takes the place of a collection screen, and the draw happens when it
+// is continued. The same is offered for every source: what is about to happen,
+// then what happened.
 static void on_generate(void) {
-    ui_show_msg("Generating words...");
-    ui_delay_ms(500);
-    mnemonic_t* m = mnemonic_generate(word_count, on_generating_msg);
-    char        desc[64];
-    int         res = snprintf(desc, sizeof(desc), "generated %u-word from %s", word_count,
-                       hal_get_random_source());
-    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    ui_show_generate_process(hal_get_random_source(), utils_word_count_bits(word_count),
+                             on_generate_continue);
 }
 
-static word_entry_handle_t we_handle   = NULL;
-static mnemonic_t*         pending_new = NULL;
+static void on_generate_continue(void) {
+    const size_t elen = utils_word_count_bytes(word_count); // 16 or 32
+    ASSERT_OR_DIE(elen <= sizeof(current_entropy), "entropy length too large");
+
+    char msg[96];
+    int  res = snprintf(msg, sizeof(msg), "Generating %u bytes of entropy from %s...",
+                       (unsigned)elen, hal_get_random_source());
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(msg), "generate message too long");
+    ui_show_msg(msg);
+    ui_delay_ms(500);
+
+    uint8_t entropy[32];
+    hal_get_random(entropy, elen);
+
+    char desc[64];
+    res = snprintf(desc, sizeof(desc), "generated %u bits from %s",
+                   utils_word_count_bits(word_count), hal_get_random_source());
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
+
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, hal_get_random_source());
+    secure_memzero(entropy, sizeof(entropy));
+}
+
+static word_entry_handle_t we_handle = NULL;
+static uint8_t             pending_entropy[32]; // the source waiting to be merged in
+static size_t              pending_entropy_len = 0;
 static char                pending_desc[64];
 static char                we_entered[MNEMONIC_MAX_INPUT_LEN];
 
 static void on_enter_manual(void);
 static void on_we_complete(void);
+static void on_we_help(void);
+static void on_we_help_close(void);
 
-static void on_merge_done(void) {
-    ASSERT_OR_DIE(pending_new, "no pending mnemonic");
-    // The merge screen still holds entropy hex + words, it stays the active
-    // screen until ui_swap_screen() runs inside ui_show_mnemonic(), so scrub
-    // it now instead of waiting for deferred deletion
-    ui_scrub_screen(lv_screen_active());
-    current     = mnemonic_combine(current, pending_new);
-    pending_new = NULL;
-    ui_log_add("merged with %s", pending_desc);
-    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_MERGED, go_source, NULL);
+static void pending_wipe(void) {
+    secure_memzero(pending_entropy, sizeof(pending_entropy));
+    pending_entropy_len = 0;
 }
 
-static void show_merge_screen(mnemonic_t* new_m, const char* source_desc) {
-    uint8_t ca[32], na[32], ma[32];
-    size_t  elen = mnemonic_entropy_size(current);
-    mnemonic_to_entropy(current, ca);
-    mnemonic_to_entropy(new_m, na);
-    for (size_t i = 0; i < elen; i++) ma[i] = ca[i] ^ na[i];
+static void on_merge_done(void) {
+    ASSERT_OR_DIE(pending_entropy_len, "no pending entropy");
+    ASSERT_OR_DIE(pending_entropy_len == current_entropy_len, "merge size mismatch");
 
-    mnemonic_t* preview = mnemonic_from_entropy(ma, elen);
+    // The merge screen already showed the result, so just commit it. Scrubbing
+    // now: its delete is deferred until the next screen is swapped in.
+    ui_scrub_screen(lv_screen_active());
+    for (size_t i = 0; i < current_entropy_len; i++) {
+        current_entropy[i] ^= pending_entropy[i];
+    }
+    pending_wipe();
+    ui_log_add("merged with %s", pending_desc);
+    secure_memzero(pending_desc, sizeof(pending_desc));
+    go_source();
+}
 
-    char ca_hex[65], na_hex[65], ma_hex[65];
-    bytes_to_hex(ca, elen, ca_hex, sizeof(ca_hex));
-    bytes_to_hex(na, elen, na_hex, sizeof(na_hex));
-    bytes_to_hex(ma, elen, ma_hex, sizeof(ma_hex));
+// What XOR does to the two seeds, from the screen that shows it happening. The
+// pending side is kept, so coming back shows the same merge again.
+static void on_xor_help(void) { ui_show_xor_help(on_xor_help_close); }
 
-    secure_memzero(ma, sizeof(ma));
-    secure_memzero(na, sizeof(na));
-    secure_memzero(ca, sizeof(ca));
+static void on_xor_help_close(void) {
+    ASSERT_OR_DIE(pending_entropy_len, "no pending entropy");
+    show_merge_screen(pending_entropy, pending_entropy_len, pending_desc);
+}
 
-    pending_new = new_m;
+static void show_merge_screen(const uint8_t* new_entropy, size_t elen, const char* source_desc) {
+    ASSERT_OR_DIE(new_entropy, "null merge entropy");
+    ASSERT_OR_DIE(elen == current_entropy_len, "merge size mismatch");
+
+    uint8_t merged[32];
+    for (size_t i = 0; i < elen; i++) merged[i] = current_entropy[i] ^ new_entropy[i];
+
+    char ca_hex[2 * 32 + 1], na_hex[2 * 32 + 1], ma_hex[2 * 32 + 1];
+    ASSERT_OR_DIE(bytes_to_hex(current_entropy, elen, ca_hex, sizeof(ca_hex)),
+                  "merge hex buffer too small");
+    ASSERT_OR_DIE(bytes_to_hex(new_entropy, elen, na_hex, sizeof(na_hex)),
+                  "merge hex buffer too small");
+    ASSERT_OR_DIE(bytes_to_hex(merged, elen, ma_hex, sizeof(ma_hex)), "merge hex buffer too small");
+
+    secure_memzero(merged, sizeof(merged));
+
+    memcpy(pending_entropy, new_entropy, elen);
+    pending_entropy_len = elen;
     snprintf(pending_desc, sizeof(pending_desc), "%s", source_desc);
 
-    ui_show_merge_process(mnemonic_words(current), ca_hex, na_hex, ma_hex, mnemonic_words(preview),
-                          on_merge_done);
+    // The result is only acted on when the Ok button is pressed.
+    ui_show_merge_process(ca_hex, na_hex, ma_hex, on_merge_done, on_xor_help);
 
-    mnemonic_discard(preview);
     // Wipe the hex renderings after use
     secure_memzero(ca_hex, sizeof(ca_hex));
     secure_memzero(na_hex, sizeof(na_hex));
@@ -147,11 +313,11 @@ static void on_we_cancel(void) {
     ui_word_entry_discard(we_handle);
     we_handle = NULL;
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 static void on_enter_manual(void) {
-    we_handle = ui_word_entry_begin(word_count, on_we_complete, on_we_cancel);
+    we_handle = ui_word_entry_begin(word_count, on_we_complete, on_we_cancel, on_we_help);
 }
 
 static void on_other_source(void) {
@@ -164,7 +330,53 @@ static hal_camera_t*      camera = NULL; /* open streaming session */
 static hal_camera_frame_t camera_frame;  /* latest captured frame (owned) */
 static uint8_t*           camera_rgb565; /* RGB565 preview buffer (owned, reused) */
 static uint32_t           camera_w = 0, camera_h = 0;
-static lv_timer_t*        camera_timer = NULL; /* live feed timer */
+static lv_timer_t*        camera_timer  = NULL; /* live feed timer */
+static unsigned           camera_frames = 0;    /* frames the feed screen has seen */
+static uint64_t           camera_bytes  = 0;    /* their payload bytes */
+
+static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_t* gray);
+
+/* Continuous QR scanning: the live feed auto-decodes and dispatches payloads.
+ * The callback returns true when the payload belongs to the screen being
+ * scanned (or is a usable part of one), which is how a file holding an
+ * unrelated QR code is told apart from one that is simply being waited on. */
+typedef bool (*qr_payload_cb_t)(qr_source_t source, const uint8_t* payload, size_t plen);
+static qr_payload_cb_t qr_scan_cb       = NULL;
+static unsigned        qr_scan_tick     = 0;
+static uint8_t*        qr_scan_last     = NULL; /* last decoded payload (dedup) */
+static size_t          qr_scan_last_len = 0;
+static uint8_t*        qr_gray_buf      = NULL; /* reusable grayscale buffer */
+static size_t          qr_gray_len      = 0;
+static uint8_t*        qr_payload_buf   = NULL; /* reusable decode buffer */
+
+/* The scan screen that is running, so an error message can bring it back. */
+static const char* qr_scan_title  = NULL;
+static ui_cb_t     qr_scan_cancel = NULL;
+static ui_cb_t     qr_scan_help   = NULL;  /* only the SeedQR scan has a help screen */
+static bool        qr_scan_paused = false; /* an error message owns the screen */
+
+static void qr_scan_stop(void) {
+    qr_scan_cb     = NULL;
+    qr_scan_tick   = 0;
+    qr_scan_title  = NULL;
+    qr_scan_cancel = NULL;
+    qr_scan_help   = NULL;
+    qr_scan_paused = false;
+    if (qr_scan_last) {
+        free(qr_scan_last);
+        qr_scan_last     = NULL;
+        qr_scan_last_len = 0;
+    }
+    if (qr_gray_buf) {
+        free(qr_gray_buf);
+        qr_gray_buf = NULL;
+        qr_gray_len = 0;
+    }
+    if (qr_payload_buf) {
+        free(qr_payload_buf);
+        qr_payload_buf = NULL;
+    }
+}
 
 static inline uint8_t clip8(int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); }
 
@@ -270,22 +482,64 @@ static const char* camera_pixfmt_name(hal_camera_pixfmt_t f) {
     }
 }
 
+/* Hand a decoded payload to the active scan callback. The camera sees the same
+ * QR code in every frame, so a repeat of the last payload is dropped - a file
+ * playing an animation repeats frames the same way. Returns whether the
+ * payload belonged to the screen being scanned. */
+static bool qr_scan_deliver(qr_source_t source, const uint8_t* payload, size_t plen) {
+    bool dup = qr_scan_last && qr_scan_last_len == plen && memcmp(qr_scan_last, payload, plen) == 0;
+    if (dup) return true; /* already handed over; not worth reporting twice */
+
+    free(qr_scan_last);
+    qr_scan_last = malloc(plen ? plen : 1);
+    ASSERT_OR_DIE(qr_scan_last, "out of memory");
+    memcpy(qr_scan_last, payload, plen);
+    qr_scan_last_len = plen;
+
+    /* The callback may well stop the scan (and with it this buffer), so nothing
+     * here is touched after it. */
+    return qr_scan_cb(source, payload, plen);
+}
+
+// Pixels for the preview and decoder. Reuse the HAL buffer when it is already
+// native-endian RGB565; converting copies 600 KB per VGA frame for nothing.
+static const uint8_t* camera_frame_pixels(void) {
+    if (camera_frame.pixfmt == HAL_CAMERA_FMT_RGB565 &&
+        (size_t)camera_frame.bytes_per_line == (size_t)camera_w * 2u) {
+        return camera_frame.data;
+    }
+
+    if (!camera_rgb565) {
+        camera_rgb565 = calloc((size_t)camera_w * camera_h, 2);
+        ASSERT_OR_DIE(camera_rgb565, "out of memory for camera preview");
+    }
+    camera_frame_to_rgb565(&camera_frame, camera_rgb565);
+    return camera_rgb565;
+}
+
 static void camera_feed_tick(lv_timer_t* t) {
     (void)t;
 
+    /* An error message owns the screen for a moment: the widgets this feed
+     * draws into went with the screen it replaced. */
+    if (qr_scan_paused) return;
+
+    /* An image file picked while a scan is running arrives through this timer
+     * too (only the browser defers the pick, the desktop decodes it in place). */
+    qr_scan_poll_file();
+
     hal_camera_frame_t next;
     memset(&next, 0, sizeof(next));
+    const uint32_t t_grab = lv_tick_get();
     if (!hal_camera_grab(camera, &next)) {
         return; /* keep showing the previous frame */
     }
 
+    // Release is timed separately: it zeroes 600 KB before freeing, which is
+    // measurable at VGA.
+    const uint32_t t_release = lv_tick_get();
     hal_camera_frame_free(&camera_frame);
     camera_frame = next;
-
-    LOG_INFO("camera frame: %ux%u pixfmt=%s size=%zu bytes_per_line=%u",
-             (unsigned)camera_frame.width, (unsigned)camera_frame.height,
-             camera_pixfmt_name(camera_frame.pixfmt), camera_frame.size,
-             (unsigned)camera_frame.bytes_per_line);
 
     if (camera_frame.width != camera_w || camera_frame.height != camera_h) {
         /* dimensions changed - drop the stale preview buffer */
@@ -298,16 +552,57 @@ static void camera_feed_tick(lv_timer_t* t) {
         camera_h = camera_frame.height;
     }
 
-    if (!camera_rgb565) {
-        camera_rgb565 = calloc((size_t)camera_w * camera_h, 2);
-        ASSERT_OR_DIE(camera_rgb565, "out of memory for camera preview");
-    }
+    // Every grabbed frame counts towards the feed screen's numbers, whether or
+    // not it ends up being used.
+    camera_frames++;
+    camera_bytes += camera_frame.size;
 
-    camera_frame_to_rgb565(&camera_frame, camera_rgb565);
-    ui_camera_feed_update(camera_rgb565, camera_w, camera_h);
+    const uint32_t t_preview = lv_tick_get();
+    const uint8_t* pixels    = camera_frame_pixels();
+    ui_camera_feed_update(pixels, camera_w, camera_h);
+    ui_camera_feed_stats(camera_frames, camera_bytes);
+
+    const uint32_t t_decode = lv_tick_get();
+    if (qr_scan_cb && (++qr_scan_tick % 3u) == 0) {
+        /* Throttled continuous decode: scan every 3rd frame (~360 ms). */
+        size_t need = (size_t)camera_w * camera_h;
+        if (!qr_gray_buf || qr_gray_len < need) {
+            free(qr_gray_buf);
+            qr_gray_buf = malloc(need);
+            ASSERT_OR_DIE(qr_gray_buf, "out of memory");
+            qr_gray_len = need;
+        }
+        if (!qr_payload_buf) {
+            qr_payload_buf = malloc(TXINSPECT_MAX_PAYLOAD);
+            ASSERT_OR_DIE(qr_payload_buf, "out of memory");
+        }
+
+        rgb565_to_gray(pixels, camera_w, camera_h, qr_gray_buf);
+        size_t plen = 0;
+        if (qr_decode(qr_gray_buf, camera_w, camera_h, qr_payload_buf, TXINSPECT_MAX_PAYLOAD,
+                      &plen)) {
+            /* A frame that is not for this screen is passed over silently: the
+             * next one arrives in a moment. */
+            (void)qr_scan_deliver(QR_SOURCE_CAMERA, qr_payload_buf, plen);
+        }
+    }
+    const uint32_t t_end = lv_tick_get();
+
+    // Decode runs every 3rd frame; the per-stage times show where a slow frame
+    // goes.
+    LOG_INFO("camera frame: %ux%u pixfmt=%s stride=%u size=%zu | grab %ums release %ums "
+             "preview %ums decode %ums total %ums",
+             (unsigned)camera_frame.width, (unsigned)camera_frame.height,
+             camera_pixfmt_name(camera_frame.pixfmt), (unsigned)camera_frame.bytes_per_line,
+             camera_frame.size, (unsigned)(t_release - t_grab), (unsigned)(t_preview - t_release),
+             (unsigned)(t_decode - t_preview), (unsigned)(t_end - t_decode),
+             (unsigned)(t_end - t_grab));
 }
 
 static void camera_feed_stop(void) {
+    /* A picked file may still be playing frames into the scan. */
+    hal_file_image_reset();
+    qr_scan_stop();
     if (camera_timer) {
         lv_timer_delete(camera_timer);
         camera_timer = NULL;
@@ -319,13 +614,22 @@ static void camera_feed_stop(void) {
     camera_release();
 }
 
+// The help screen replaces the feed's widgets; the feed timer keeps running, so
+// closing the help puts the same session back on screen.
+static void show_camera_screen(void) {
+    ASSERT_OR_DIE(camera, "no camera session");
+    ui_show_camera_feed(on_camera_use, on_camera_cancel, on_camera_help);
+}
+
 static void on_camera_image(void) {
     if (!hal_camera_available()) {
         FATAL("Camera not available.");
     }
-    camera = hal_camera_open();
+    camera_frames = 0; // the numbers on the feed screen start here
+    camera_bytes  = 0;
+    camera        = hal_camera_open();
     ASSERT_OR_DIE(camera, "Failed to open camera.");
-    ui_show_camera_feed(on_camera_use, on_camera_cancel);
+    show_camera_screen();
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
 }
 
@@ -334,6 +638,10 @@ static void on_camera_cancel(void) {
     ui_show_other_source(on_camera_image, on_scan_qr, on_dice_rolls, on_coin_flips, on_touch_screen,
                          go_source);
 }
+
+static void on_camera_help(void) { ui_show_camera_help(on_camera_help_close); }
+
+static void on_camera_help_close(void) { show_camera_screen(); }
 
 static void on_camera_use(void) {
     /* Stop the feed and close the camera; the last grabbed frame stays valid. */
@@ -350,20 +658,26 @@ static void on_camera_use(void) {
         FATAL("No camera image captured yet.");
     }
 
-    /* Derive entropy (16 or 32 bytes) from the raw camera bytes. */
-    size_t  elen = (word_count == 24) ? 32 : 16;
-    uint8_t entropy[32];
+    /* Say what is being taken, the way the other sources say what they are doing,
+     * then take it: the whole frame goes into the hash. */
+    char msg[80];
+    int res = snprintf(msg, sizeof(msg), "Camera Image %ux%u - %u Bytes, hashing as entropy source",
+                       (unsigned)camera_frame.width, (unsigned)camera_frame.height,
+                       (unsigned)camera_frame.size);
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(msg), "camera message too long");
+    ui_show_msg(msg);
+    ui_delay_ms(1500);
+
+    const size_t elen = (word_count == 24) ? 32 : 16;
+    uint8_t      entropy[32];
     sha256_expand(camera_frame.data, camera_frame.size, entropy, elen);
-
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
-
     camera_release();
 
     char desc[48];
-    int  res = snprintf(desc, sizeof(desc), "camera image %u-word", word_count);
+    res = snprintf(desc, sizeof(desc), "camera image %u bits", utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, "camera image");
+    secure_memzero(entropy, sizeof(entropy));
 }
 
 static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_t* gray) {
@@ -378,14 +692,70 @@ static void rgb565_to_gray(const uint8_t* rgb565, uint32_t w, uint32_t h, uint8_
     }
 }
 
+/* -- Scan screen errors ------------------------------------------------ */
+/* How long an error stays on screen before scanning carries on. */
+#define QR_SCAN_ERROR_MS 500u
+
+/* Show the scan screen of the running scan. */
+static void qr_scan_screen_show(void) {
+    ui_show_qr_scan_auto(qr_scan_cancel, qr_scan_title, on_scan_file, qr_scan_help);
+
+    /* The camera keeps streaming while a message is up, so the new screen
+     * starts from the last frame instead of an empty box. */
+    if (camera_w && camera_h && camera_frame.data) {
+        ui_camera_feed_update(camera_frame_pixels(), camera_w, camera_h);
+    }
+}
+
+/*
+ * A payload the screen cannot use - or a file holding no readable QR code at
+ * all - is worth more than a line of small print: the message takes over the
+ * screen for a moment and the scan then carries on where it left off. The
+ * camera session, the multi-part UR decoder and the feed timer all stay as they
+ * are; the timer only skips its work while the message is up, because the
+ * widgets it draws into belong to the screen that was replaced.
+ */
+static void qr_scan_error(const char* msg) {
+    ASSERT_OR_DIE(msg, "null message");
+    ASSERT_OR_DIE(qr_scan_cb, "no active scan");
+
+    /* Whatever came out of the file is not for this screen: drop the pick, so
+     * a looping animation does not raise the same message over and over. */
+    hal_file_image_reset();
+
+    qr_scan_paused = true;
+    ui_show_msg(msg);
+    ui_delay_ms(QR_SCAN_ERROR_MS);
+    qr_scan_paused = false;
+
+    if (!qr_scan_cb) return; /* the scan ended while the message was up */
+    qr_scan_screen_show();
+}
+
 static void on_scan_qr(void) {
     if (!hal_camera_available()) {
         FATAL("Camera not available.");
     }
     camera = hal_camera_open();
     ASSERT_OR_DIE(camera, "Failed to open camera.");
-    ui_show_qr_scan(on_qr_scan, on_qr_scan_cancel);
+    qr_scan_cb     = on_seedqr_payload;
+    qr_scan_title  = "Scan SeedQR";
+    qr_scan_cancel = on_qr_scan_cancel;
+    qr_scan_help   = on_seedqr_help;
+    qr_scan_screen_show();
     camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+// While the help screen is up it owns the widgets the feed timer would draw
+// into, so the timer stays idle until the scan screen comes back.
+static void on_seedqr_help(void) {
+    qr_scan_paused = true;
+    ui_show_seedqr_help(on_seedqr_help_close);
+}
+
+static void on_seedqr_help_close(void) {
+    qr_scan_paused = false;
+    qr_scan_screen_show();
 }
 
 static void on_qr_scan_cancel(void) {
@@ -394,81 +764,794 @@ static void on_qr_scan_cancel(void) {
                          go_source);
 }
 
-static void on_qr_scan(void) {
-    if (camera_timer) {
-        lv_timer_delete(camera_timer);
-        camera_timer = NULL;
-    }
-    if (camera) {
-        hal_camera_close(camera);
-        camera = NULL;
-    }
-    if (!camera_rgb565 || camera_w == 0 || camera_h == 0) {
-        camera_release();
-        FATAL("No camera image captured yet.");
-    }
+static bool on_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    mnemonic_t* m = NULL;
 
-    uint8_t* gray = malloc((size_t)camera_w * camera_h);
-    ASSERT_OR_DIE(gray, "out of memory");
-    rgb565_to_gray(camera_rgb565, camera_w, camera_h, gray);
-
-    uint8_t     payload[256];
-    size_t      plen = 0;
-    mnemonic_t* m    = NULL;
-
-    if (qr_decode(gray, camera_w, camera_h, payload, sizeof(payload), &plen)) {
-        if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
-            char digits[SEEDQR_STANDARD_24_DIGITS + 1];
-            memcpy(digits, payload, plen);
-            digits[plen] = '\0';
-            m            = seedqr_standard_decode(digits);
-        } else if (plen == 16 || plen == 32) {
-            m = seedqr_compact_decode(payload, plen);
-        }
+    if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
+        char digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        memcpy(digits, payload, plen);
+        digits[plen] = '\0';
+        m            = seedqr_standard_decode(digits);
+        secure_memzero(digits, sizeof(digits));
+    } else if (plen == 16 || plen == 32) {
+        m = seedqr_compact_decode(payload, plen);
     }
-
-    secure_memzero(gray, (size_t)camera_w * camera_h);
-    free(gray);
-    camera_release();
 
     if (!m) {
-        ui_show_msg("No valid SeedQR found");
-        ui_delay_ms(1500);
-        on_qr_scan_cancel();
+        /* From the camera this means "keep looking"; a picked file has no next
+         * frame to look at, so say what was wrong with it. */
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a SeedQR code");
+        return false; /* not a SeedQR */
+    }
+
+    camera_feed_stop();
+
+    uint8_t      entropy[32];
+    const size_t elen = mnemonic_take_entropy(m, entropy); // the words are not kept
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected SeedQR entropy length");
+
+    unsigned wc = (elen == 32) ? 24 : 12;
+    char     desc[48];
+    int      res = snprintf(desc, sizeof(desc), "scanned %u-bit SeedQR", utils_word_count_bits(wc));
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, desc, "scanned SeedQR");
+    secure_memzero(entropy, sizeof(entropy));
+    return true;
+}
+
+/* -- Scanning a QR code from an image file ---------------------------- */
+/*
+ * The desktop and browser builds can load a QR code from an image file (a
+ * screenshot exported by another wallet, a photo of a printed SeedQR, ...)
+ * instead of pointing the camera at it. The platform decodes the picked file
+ * and hands back grayscale frames, which then take the very same
+ * decode/dispatch path as a camera frame. An animated GIF arrives one frame at
+ * a time, so an animated multi-part UR collects its parts just as it would from
+ * the camera.
+ */
+static void on_scan_file(void) {
+    if (!qr_scan_cb) return;
+
+    /* Drop the previous message: the picker is about to report something. */
+    ui_qr_scan_progress(0, 0);
+    hal_file_image_pick();
+}
+
+static void qr_scan_poll_file(void) {
+    if (!qr_scan_cb) return; /* only the scan screens offer a file pick */
+
+    hal_camera_frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+
+    switch (hal_file_image_poll(&frame)) {
+    case HAL_FILE_IMAGE_NONE:
+        return; /* nothing picked yet, or the picker was cancelled */
+    case HAL_FILE_IMAGE_FAILED:
+        qr_scan_error("Could not read an image file");
+        return;
+    case HAL_FILE_IMAGE_READY:
+        break;
+    }
+
+    if (frame.pixfmt != HAL_CAMERA_FMT_GRAY8 || !frame.data) {
+        hal_camera_frame_free(&frame);
+        qr_scan_error("Could not read an image file");
         return;
     }
 
-    unsigned wc = (mnemonic_entropy_size(m) == 32) ? 24 : 12;
-    char     desc[48];
-    int      res = snprintf(desc, sizeof(desc), "scanned %u-word SeedQR", wc);
-    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_ENTERED, desc);
+    if (!qr_payload_buf) {
+        qr_payload_buf = malloc(TXINSPECT_MAX_PAYLOAD);
+        ASSERT_OR_DIE(qr_payload_buf, "out of memory");
+    }
+
+    size_t plen = 0;
+    if (qr_decode(frame.data, frame.width, frame.height, qr_payload_buf, TXINSPECT_MAX_PAYLOAD,
+                  &plen)) {
+        LOG_INFO("QR image file decoded: %ux%u", (unsigned)frame.width, (unsigned)frame.height);
+        /* A payload this screen cannot use is reported by its own callback:
+         * unlike a camera frame, there is no next frame to wait for. */
+        (void)qr_scan_deliver(QR_SOURCE_FILE, qr_payload_buf, plen);
+    } else {
+        qr_scan_error("No QR code found in that image");
+    }
+
+    hal_camera_frame_free(&frame);
 }
 
-static void on_export_seedqr(void) {
-    if (!current) {
+/* -- Inspect transaction/PSBT ---------------------------------------- */
+static tx_inspect_t*      inspected   = NULL;
+static ur_psbt_decoder_t* ur_decoder  = NULL;
+static descriptor_t*      wallet_desc = NULL;
+
+/* Network the scanned payload is interpreted as. A transaction does not say
+ * which network it belongs to: the same output script is spendable on mainnet
+ * and on testnet alike, and only the address encoding differs. The user picks
+ * it before scanning, and it decides how addresses are rendered. The order
+ * must match tx_inspect_network_t. */
+static const char* const TX_NETWORKS[] = {"Mainnet", "Testnet", "Signet", "Regtest"};
+#define TX_NETWORK_COUNT (sizeof(TX_NETWORKS) / sizeof(TX_NETWORKS[0]))
+
+static tx_inspect_network_t tx_network = TX_INSPECT_NETWORK_MAINNET;
+
+static void ur_decoder_reset(void) {
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = ur_psbt_decoder_new();
+}
+
+/* Descriptor UR decoder: lives only while the descriptor QR is being scanned
+ * (it accumulates the animated multi-part fragments of a large descriptor). */
+static ur_descriptor_decoder_t* desc_decoder = NULL;
+
+static void desc_decoder_reset(void) {
+    ur_descriptor_decoder_free(desc_decoder);
+    desc_decoder = ur_descriptor_decoder_new();
+}
+
+static void desc_decoder_stop(void) {
+    ur_descriptor_decoder_free(desc_decoder);
+    desc_decoder = NULL;
+}
+
+/* Classify an output address against the scanned wallet descriptor (if any). */
+static tx_output_kind_t classify_output(void* ctx, size_t out_index, const char* address) {
+    (void)out_index;
+    descriptor_t* d = ctx;
+    if (!d) return TX_OUTPUT_NONE;
+    switch (descriptor_classify(d, address)) {
+    case DESCRIPTOR_MATCH_CHANGE:
+        return TX_OUTPUT_CHANGE;
+    case DESCRIPTOR_MATCH_RECEIVE:
+        return TX_OUTPUT_RECEIVE;
+    case DESCRIPTOR_MATCH_NONE:
+        return TX_OUTPUT_NONE;
+    }
+    return TX_OUTPUT_NONE;
+}
+
+static void show_inspected_tx(void) {
+    /* The network is chosen before scanning; apply it now so addresses are
+     * rendered for it. */
+    tx_inspect_set_network(inspected, tx_network);
+
+    char* body = malloc(TXINSPECT_RENDER_MAX);
+    ASSERT_OR_DIE(body, "out of memory");
+    tx_inspect_render_ex(inspected, body, TXINSPECT_RENDER_MAX, classify_output, wallet_desc);
+
+    char* warning = malloc(TXINSPECT_WARNING_MAX);
+    ASSERT_OR_DIE(warning, "out of memory");
+    bool warn = tx_inspect_nonce_warning(inspected, warning, TXINSPECT_WARNING_MAX);
+
+    /* Repeat the network in the title: the address lines themselves give no
+     * hint of which network they were encoded for. */
+    char title[64];
+    int  res = snprintf(title, sizeof(title), "%s (%s)", tx_inspect_kind_name(inspected),
+                       tx_inspect_network_name(tx_inspect_network(inspected)));
+    ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(title), "title too long");
+
+    ui_show_tx_inspect(title, body, warn ? warning : NULL, on_inspect_tx_done);
+
+    // The UI has copied the strings it needs; scrub and release the buffers.
+    secure_memzero(warning, TXINSPECT_WARNING_MAX);
+    free(warning);
+    secure_memzero(body, TXINSPECT_RENDER_MAX);
+    free(body);
+}
+
+/* Ask whether to scan a wallet descriptor first, so change outputs can be
+ * flagged on the transaction summary. */
+static void ask_descriptor_or_scan(void) {
+    ui_show_confirm("Scan Transaction/PSBT",
+                    "Scan a wallet descriptor first?\n\nA descriptor lets you "
+                    "verify which outputs are your change.",
+                    "Scan descriptor", "Just scan", on_scan_descriptor, on_skip_descriptor);
+}
+
+static void on_network_chosen(uint8_t index) {
+    tx_network =
+        index < TX_NETWORK_COUNT ? (tx_inspect_network_t)index : TX_INSPECT_NETWORK_MAINNET;
+    ask_descriptor_or_scan();
+}
+
+static void on_inspect_tx(lv_event_t* e) {
+    (void)e;
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    ui_show_choice("Transaction Network", "Which network is this transaction for?", TX_NETWORKS,
+                   TX_NETWORK_COUNT, on_network_chosen, show_main_screen);
+}
+
+static void on_skip_descriptor(void) { start_tx_scan(); }
+
+static void on_scan_descriptor(void) {
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb     = on_descriptor_payload;
+    qr_scan_title  = "Scan Wallet Descriptor";
+    qr_scan_cancel = on_descriptor_cancel;
+    qr_scan_help   = NULL;
+    desc_decoder_reset();
+    qr_scan_screen_show();
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_descriptor_cancel(void) {
+    camera_feed_stop();
+    desc_decoder_stop();
+    on_inspect_tx(NULL);
+}
+
+/* Show what was scanned before the descriptor is used: the scan only proves
+ * the text parses, not that it is the wallet the user meant to load. */
+static void show_descriptor_overview(void) {
+    char* body = malloc(DESCRIPTOR_OVERVIEW_MAX);
+    ASSERT_OR_DIE(body, "out of memory");
+
+    size_t len = descriptor_overview(wallet_desc, body, DESCRIPTOR_OVERVIEW_MAX);
+    if (len == 0) {
+        /* Nothing to review (should not happen for a parsed descriptor):
+         * carry on rather than block the scan. */
+        free(body);
+        start_tx_scan();
+        return;
+    }
+
+    ui_show_descriptor_overview("Wallet Descriptor", body, on_descriptor_overview_continue,
+                                on_descriptor_overview_cancel);
+
+    // The UI has copied the text it needs; scrub and release the buffer.
+    secure_memzero(body, DESCRIPTOR_OVERVIEW_MAX);
+    free(body);
+}
+
+static void on_descriptor_overview_continue(void) { start_tx_scan(); }
+
+static void on_descriptor_overview_cancel(void) {
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    on_inspect_tx(NULL);
+}
+
+static bool descriptor_accept(descriptor_status_t st, descriptor_t* d, qr_source_t source) {
+    if (!d) {
+        if (st == DESCRIPTOR_ERR_TOO_LONG) {
+            camera_feed_stop();
+            desc_decoder_stop();
+            ui_show_msg("Descriptor is too long to scan.");
+            ui_delay_ms(2000);
+            on_inspect_tx(NULL);
+            return true;
+        }
+
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a wallet descriptor");
+        return false; /* not a descriptor (or an unsupported one) */
+    }
+
+    camera_feed_stop();
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = d;
+    show_descriptor_overview();
+    return true;
+}
+
+static bool on_descriptor_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    /* UR-encoded descriptor: single-part or animated multi-part
+     * ur:output-descriptor / ur:crypto-output. */
+    if (plen >= 3 && (payload[0] == 'u' || payload[0] == 'U') &&
+        (payload[1] == 'r' || payload[1] == 'R') && payload[2] == ':') {
+        if (!desc_decoder) desc_decoder = ur_descriptor_decoder_new();
+
+        char* text = NULL;
+        int   r    = ur_descriptor_decoder_receive(desc_decoder, (const char*)payload, plen, &text);
+        if (r == 0) { /* a part; the rest of the descriptor is still to come */
+            ui_qr_scan_progress(ur_descriptor_decoder_received(desc_decoder),
+                                ur_descriptor_decoder_expected(desc_decoder));
+            return true;
+        }
+        if (r == 1) {
+            descriptor_status_t st = DESCRIPTOR_ERR_NOT_DESC;
+            descriptor_t*       d  = descriptor_parse((const uint8_t*)text, strlen(text), &st);
+            secure_memzero(text, strlen(text));
+            free(text);
+            return descriptor_accept(st, d, source);
+        }
+
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a wallet descriptor");
+        return false; /* not a descriptor UR part */
+    }
+
+    descriptor_status_t st = DESCRIPTOR_ERR_NOT_DESC;
+    descriptor_t*       d  = descriptor_parse(payload, plen, &st);
+    return descriptor_accept(st, d, source);
+}
+
+static void start_tx_scan(void) {
+    if (!hal_camera_available()) {
+        FATAL("Camera not available.");
+    }
+    ur_decoder_reset();
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb     = on_tx_payload;
+    qr_scan_title  = "Scan Transaction/PSBT";
+    qr_scan_cancel = on_inspect_tx_cancel;
+    qr_scan_help   = NULL;
+    qr_scan_screen_show();
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_inspect_tx_cancel(void) {
+    camera_feed_stop();
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = NULL;
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    show_main_screen();
+}
+
+static void on_inspect_tx_done(void) {
+    tx_inspect_free(inspected);
+    inspected = NULL;
+    ur_psbt_decoder_free(ur_decoder);
+    ur_decoder = NULL;
+    desc_decoder_stop();
+    descriptor_free(wallet_desc);
+    wallet_desc = NULL;
+    show_main_screen();
+}
+
+static bool on_tx_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    /* UR-encoded PSBT: single-part or animated multi-part (fountain). */
+    if (plen >= 3 && (payload[0] == 'u' || payload[0] == 'U') &&
+        (payload[1] == 'r' || payload[1] == 'R') && payload[2] == ':') {
+        if (!ur_decoder) ur_decoder = ur_psbt_decoder_new();
+
+        uint8_t* psbt     = NULL;
+        size_t   psbt_len = 0;
+        int r = ur_psbt_decoder_receive(ur_decoder, (const char*)payload, plen, &psbt, &psbt_len);
+
+        if (r == 1) {
+            inspected = tx_inspect_parse(psbt, psbt_len);
+            secure_memzero(psbt, psbt_len);
+            free(psbt);
+            camera_feed_stop();
+            if (!inspected) {
+                ui_show_msg("Not a valid PSBT");
+                ui_delay_ms(1500);
+                on_inspect_tx_cancel();
+                return true; /* the user was told why */
+            }
+            show_inspected_tx();
+            return true;
+        }
+        if (r == 0) { /* a part; the rest of the PSBT is still to come */
+            ui_qr_scan_progress(ur_psbt_decoder_received(ur_decoder),
+                                ur_psbt_decoder_expected(ur_decoder));
+            return true;
+        }
+
+        /* r == -1: not a valid PSBT UR part. */
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a transaction or PSBT");
+        return false;
+    }
+
+    /* Raw transaction / PSBT (hex or base64). */
+    inspected = tx_inspect_parse(payload, plen);
+    if (!inspected) {
+        if (source == QR_SOURCE_FILE) qr_scan_error("Not a transaction or PSBT");
+        return false;
+    }
+
+    camera_feed_stop();
+    show_inspected_tx();
+    return true;
+}
+
+/* -- The bits behind the words ---------------------------------------- */
+/* The final screen, the bits screen and the state screen all show where the
+ * words came from, so the bundle is built once from the live mnemonic. */
+static uint8_t         bits_entropy[32];
+static uint16_t        bits_indices[24];
+static char            bits_hex[2 * 32 + 1];
+static mnemonic_bits_t bits_bundle;
+
+// NULL when there are no words yet; the buffers stay valid until bits_wipe().
+static const mnemonic_bits_t* current_bits(void) {
+    if (!final_mnemonic) return NULL;
+
+    const size_t elen = current_entropy_len;
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+    memcpy(bits_entropy, current_entropy, elen);
+    ASSERT_OR_DIE(bytes_to_hex(bits_entropy, elen, bits_hex, sizeof(bits_hex)),
+                  "entropy hex buffer too small");
+    const unsigned count = (unsigned)mnemonic_word_indices(final_mnemonic, bits_indices, 24);
+    ASSERT_OR_DIE(count == 12 || count == 24, "unexpected word count");
+
+    bits_bundle.entropy_hex = bits_hex;
+    bits_bundle.entropy     = bits_entropy;
+    bits_bundle.entropy_len = elen;
+    bits_bundle.indices     = bits_indices;
+    bits_bundle.index_count = count;
+    return &bits_bundle;
+}
+
+static void bits_wipe(void) {
+    secure_memzero(bits_entropy, sizeof(bits_entropy));
+    secure_memzero(bits_hex, sizeof(bits_hex));
+    memset(&bits_bundle, 0, sizeof(bits_bundle));
+}
+
+static void on_words_help(void) { ui_show_words_help(on_words_help_close); }
+
+static void on_words_help_close(void) { show_final_screen(); }
+
+static void show_final_screen(void) {
+    ASSERT_OR_DIE(current_entropy_len == 16 || current_entropy_len == 32, "no seed to show");
+
+    // The words exist for this screen and nowhere else.
+    final_mnemonic_wipe();
+    final_mnemonic = mnemonic_from_entropy(current_entropy, current_entropy_len);
+    ASSERT_OR_DIE(final_mnemonic, "mnemonic from entropy failed");
+
+    ui_show_mnemonic(mnemonic_words(final_mnemonic), MNEMONIC_TYPE_FINAL, on_finish_done,
+                     on_seedqr_export, on_verify_keys, on_words_help, current_bits());
+}
+
+/* -- Wallet keys ------------------------------------------------------ */
+/* The master key costs a PBKDF2 stretch that takes seconds on a small MCU, so
+ * it is derived on a background task while the screen shows a spinner. The
+ * four policies are cheap next to it and are derived on demand: only the tab
+ * being looked at, and only the first time it is opened. */
+#define KC_TAB_COUNT KEYCHECK_POLICY_COUNT
+
+/* Keep the spinner up for at least this long. The derivation takes seconds on a
+ * small MCU and milliseconds on a desktop or in a browser. */
+#define KC_MIN_SPINNER_MS 1000
+
+static keycheck_t* kc_session;       /* master material, kept while the words last */
+static char*       kc_session_words; /* which mnemonic kc_session belongs to */
+static size_t      kc_tab;           /* tab on screen */
+static bool        kc_live;          /* the keys screen is the visible one */
+static bool        kc_master_failed; /* the PBKDF2 step failed for these words */
+static bool        kc_policy_failed[KC_TAB_COUNT];
+static lv_timer_t* kc_timer;     /* polls the background job */
+static uint32_t    kc_job_start; /* lv_tick_get() when the job was started */
+
+/* The one running job. The worker owns the words string and the result until
+ * kc_finish_job() takes them over. */
+static char*         kc_job_words;
+static keycheck_t*   kc_job_result;
+static bool          kc_job_ok;
+static bool          kc_discard; /* result belongs to a mnemonic no longer shown */
+static volatile bool kc_job_done;
+
+static char* words_dup(const char* words) {
+    const size_t n    = strlen(words) + 1;
+    char*        copy = malloc(n);
+    if (copy) memcpy(copy, words, n);
+    return copy;
+}
+
+static void words_free(char** words) {
+    if (!*words) return;
+    secure_memzero(*words, strlen(*words));
+    free(*words);
+    *words = NULL;
+}
+
+static bool kc_session_matches(void) {
+    if (!kc_session || !kc_session_words || !final_mnemonic) return false;
+    return strcmp(kc_session_words, mnemonic_words(final_mnemonic)) == 0;
+}
+
+static void kc_session_free(void) {
+    keycheck_free(kc_session);
+    kc_session = NULL;
+    words_free(&kc_session_words);
+}
+
+/* Runs on the background task: no LVGL here, only the job slots. */
+static void kc_master_worker(void* arg) {
+    (void)arg;
+    kc_job_result = keycheck_begin_words(kc_job_words, NULL, KEYCHECK_MAINNET);
+    kc_job_ok     = kc_job_result != NULL;
+    __sync_synchronize();
+    kc_job_done = true;
+}
+
+static void kc_start_master(void) {
+    ASSERT_OR_DIE(final_mnemonic, "no mnemonic to derive from");
+    ASSERT_OR_DIE(kc_timer == NULL, "a key derivation is already running");
+
+    kc_job_words = words_dup(mnemonic_words(final_mnemonic));
+    ASSERT_OR_DIE(kc_job_words, "out of memory");
+    kc_job_result = NULL;
+    kc_job_ok     = false;
+    kc_job_done   = false;
+    kc_job_start  = lv_tick_get();
+
+    if (hal_work_start(kc_master_worker, NULL)) {
+        kc_timer = lv_timer_create(kc_poll_cb, 50, NULL);
+        ASSERT_OR_DIE(kc_timer, "could not create the key derivation timer");
+        return;
+    }
+
+    /* No background task on this platform: paint the spinner, then do the work
+     * here, and leave the spinner up for its minimum time. */
+    kc_refresh();
+    lv_refr_now(NULL);
+    kc_master_worker(NULL);
+    uint32_t elapsed = lv_tick_elaps(kc_job_start);
+    if (elapsed < KC_MIN_SPINNER_MS) ui_delay_ms(KC_MIN_SPINNER_MS - elapsed);
+    kc_finish_job();
+}
+
+/* Take over a finished job. State only: the caller refreshes the screen. */
+static void kc_finish_job(void) {
+    __sync_synchronize();
+    kc_job_done = false;
+
+    if (kc_timer) {
+        lv_timer_delete(kc_timer);
+        kc_timer = NULL;
+    }
+
+    if (kc_job_ok && !kc_discard) {
+        kc_session_free();
+        kc_session       = kc_job_result;
+        kc_session_words = kc_job_words;
+        kc_job_words     = NULL;
+        kc_master_failed = false;
+        memset(kc_policy_failed, 0, sizeof(kc_policy_failed));
+    } else {
+        keycheck_free(kc_job_result);
+        if (!kc_discard) kc_master_failed = true;
+    }
+    kc_job_result = NULL;
+    kc_discard    = false;
+    words_free(&kc_job_words);
+
+    if (!kc_live && kc_session && !kc_session_matches()) kc_session_free();
+}
+
+/* -- The values the keys screen shows ---------------------------------- */
+enum {
+    KC_ROW_XPUB = 0,
+    KC_ROW_XPRIV,
+    KC_ROW_DESCRIPTOR,
+    KC_ROW_RECEIVE,
+    KC_ROW_CHANGE,
+    KC_ROW_COUNT,
+};
+
+static const char* const kc_row_labels[KC_ROW_COUNT] = {"xpub", "xpriv", "descriptor", "receive",
+                                                        "change"};
+
+/* The selected tab's value for one row, into @p out. */
+static bool kc_row_text(size_t row, char* out, size_t cap) {
+    if (!kc_session_matches() || !keycheck_policy_ready(kc_session, kc_tab)) return false;
+
+    const keycheck_policy_t* p   = keycheck_policy(kc_session, kc_tab);
+    const char*              src = NULL;
+    switch (row) {
+    case KC_ROW_XPUB:
+        src = p->account_xpub;
+        break;
+    case KC_ROW_XPRIV:
+        src = p->account_xprv;
+        break;
+    case KC_ROW_DESCRIPTOR:
+        return keycheck_policy_descriptor(kc_session, kc_tab, out, cap) > 0;
+    case KC_ROW_RECEIVE:
+        src = p->receive;
+        break;
+    case KC_ROW_CHANGE:
+        src = p->change;
+        break;
+    default:
+        return false;
+    }
+
+    const size_t n = strlen(src);
+    if (n == 0 || n >= cap) return false;
+    memcpy(out, src, n + 1);
+    return true;
+}
+
+static void kc_refresh(void) {
+    if (!kc_live) return;
+
+    ui_keycheck_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.fingerprint    = kc_session_matches() ? keycheck_fingerprint(kc_session) : NULL;
+    view.has_passphrase = false;
+    view.tab_count      = KC_TAB_COUNT;
+    view.tab            = kc_tab;
+    for (size_t i = 0; i < KC_TAB_COUNT; i++) view.tabs[i] = keycheck_policy_tab(i);
+
+    /* The tab's values, one row per exportable part. Buffers are static so the
+     * strings live as long as the screen needs them; ui_show_keycheck() copies. */
+    static char              values[KC_ROW_COUNT][192];
+    static ui_keycheck_row_t rows[KC_ROW_COUNT];
+    size_t                   nrows = 0;
+
+    if (kc_session && keycheck_policy_ready(kc_session, kc_tab)) {
+        for (size_t i = 0; i < KC_ROW_COUNT; i++) {
+            if (!kc_row_text(i, values[i], sizeof(values[i]))) continue;
+            rows[nrows].label  = kc_row_labels[i];
+            rows[nrows].value  = values[i];
+            rows[nrows].secret = (i == KC_ROW_XPRIV);
+            nrows++;
+        }
+    }
+
+    if (kc_timer) {
+        view.busy = true; /* a job is running */
+    } else if (kc_master_failed) {
+        view.error = "Could not derive the wallet keys from these words.";
+    } else if (kc_policy_failed[kc_tab]) {
+        view.error = "Could not derive the keys for this tab.";
+    } else if (nrows == 0) {
+        view.busy = true; /* about to be derived */
+    }
+    view.rows      = rows;
+    view.row_count = nrows;
+
+    ui_show_keycheck(&view, on_keycheck_tab, on_row_qr, on_keycheck_done);
+}
+
+/* Bring the screen up to date, deriving whatever it needs that is missing. */
+static void kc_update(void) {
+    if (!kc_live) return;
+
+    if (!kc_timer && !kc_session && !kc_master_failed) kc_start_master();
+
+    if (!kc_timer && kc_session_matches() && !keycheck_policy_ready(kc_session, kc_tab) &&
+        !kc_policy_failed[kc_tab]) {
+        if (!keycheck_policy_derive(kc_session, kc_tab)) kc_policy_failed[kc_tab] = true;
+    }
+
+    kc_refresh();
+}
+
+static void on_keycheck_tab(uint8_t index) {
+    if (index >= KC_TAB_COUNT) return;
+    kc_tab = index;
+    kc_update();
+}
+
+static void on_verify_keys(void) {
+    if (!final_mnemonic) {
         ui_go_main();
         return;
     }
 
-    uint8_t entropy[32];
-    size_t  n = seedqr_compact_encode(current, entropy, sizeof(entropy));
-    ASSERT_OR_DIE(n == 16 || n == 32, "unexpected entropy length");
+    kc_live          = true;
+    kc_master_failed = false;
 
-    if (!qr_encode(entropy, n, QR_MODE_BYTE, &exported_qr)) {
-        secure_memzero(entropy, sizeof(entropy));
-        FATAL("SeedQR encode failed");
+    /* A job left running from an earlier visit is still useful when it is for
+     * these same words; otherwise its result is not what the screen wants. */
+    if (kc_timer && kc_job_words && strcmp(kc_job_words, mnemonic_words(final_mnemonic)) != 0)
+        kc_discard = true;
+
+    if (!kc_timer && kc_session && !kc_session_matches()) kc_session_free();
+
+    kc_update();
+}
+
+static void on_keycheck_done(void) {
+    kc_live = false;
+    show_final_screen();
+}
+
+/* -- Export ----------------------------------------------------------- */
+/* The final screen's SeedQR button and the keys screen's two export buttons
+ * both end on the same full-screen QR. SeedQR needs only the words; a key or
+ * descriptor export uses the account key the keys screen has already derived
+ * for the selected tab. */
+enum { SEEDQR_FORMAT_COMPACT = 0, SEEDQR_FORMAT_STANDARD = 1 };
+
+/* Where the QR screen goes when it is done: the keys screen it was opened
+ * from, or the final screen for a SeedQR. */
+static ui_cb_t export_return;
+
+static void on_seedqr_export(void);
+static void on_seedqr_format(uint8_t format);
+
+static void on_seedqr_export(void) {
+    if (!final_mnemonic) {
+        ui_go_main();
+        return;
     }
-    secure_memzero(entropy, sizeof(entropy));
 
-    ui_show_seedqr(exported_qr.cells, exported_qr.size, on_export_done);
+    static const char* const formats[] = {"Compact SeedQR", "Standard SeedQR"};
+    ui_show_choice("Export SeedQR",
+                   "Compact encodes the raw entropy bytes, not the mnemonic words. Standard "
+                   "encodes four digits for each word.",
+                   formats, sizeof(formats) / sizeof(formats[0]), on_seedqr_format,
+                   show_final_screen);
+}
+
+static void on_seedqr_format(uint8_t format) {
+    if (!final_mnemonic) {
+        ui_go_main();
+        return;
+    }
+
+    const char* caption = "Compact";
+    if (format == SEEDQR_FORMAT_STANDARD) {
+        // The digits are the seed written as word numbers, so wipe them too.
+        char   digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        size_t n = seedqr_standard_encode(final_mnemonic, digits, sizeof(digits));
+        if (n != SEEDQR_STANDARD_12_DIGITS && n != SEEDQR_STANDARD_24_DIGITS) {
+            secure_memzero(digits, sizeof(digits));
+            FATAL("SeedQR encode failed");
+        }
+        const bool ok = qr_encode((const uint8_t*)digits, n, QR_MODE_NUMERIC, &exported_qr);
+        secure_memzero(digits, sizeof(digits));
+        if (!ok) FATAL("SeedQR encode failed");
+        caption = "Standard";
+    } else {
+        uint8_t entropy[32];
+        size_t  n = seedqr_compact_encode(final_mnemonic, entropy, sizeof(entropy));
+        if (n != 16 && n != 32) {
+            secure_memzero(entropy, sizeof(entropy));
+            FATAL("SeedQR encode failed");
+        }
+        const bool ok = qr_encode(entropy, n, QR_MODE_BYTE, &exported_qr);
+        secure_memzero(entropy, sizeof(entropy));
+        if (!ok) FATAL("SeedQR encode failed");
+    }
+
+    export_return = show_final_screen;
+    ui_show_qr("SeedQR", exported_qr.cells, exported_qr.size, caption, NULL, on_export_done);
+}
+
+/* Show the QR for one row of the keys screen. */
+static void on_row_qr(uint8_t row) {
+    if (row >= KC_ROW_COUNT || !kc_session_matches()) return;
+
+    char text[192];
+    if (!kc_row_text(row, text, sizeof(text))) return;
+
+    const keycheck_policy_t* p = keycheck_policy(kc_session, kc_tab);
+    ASSERT_OR_DIE(p, "no policy for the key export");
+
+    char caption[64];
+    snprintf(caption, sizeof(caption), "%s\n%s", p->label, kc_row_labels[row]);
+
+    /* The private key is the one value that must not travel casually. */
+    const char* warning = (row == KC_ROW_XPRIV) ? "Private key - keep it offline" : NULL;
+
+    const bool ok = qr_encode((const uint8_t*)text, strlen(text), QR_MODE_BYTE, &exported_qr);
+    secure_memzero(text, sizeof(text));
+    if (!ok) FATAL("key export encode failed");
+
+    export_return = kc_refresh;
+    ui_show_qr("Export Key", exported_qr.cells, exported_qr.size, caption, warning, on_export_done);
 }
 
 static void on_export_done(void) {
     ui_seedqr_cleanup();
     qr_grid_free(&exported_qr);
-    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_FINAL, on_finish_done,
-                     on_export_seedqr);
+    ui_cb_t next  = export_return;
+    export_return = NULL;
+    if (next) next();
+}
+
+static void kc_poll_cb(lv_timer_t* t) {
+    (void)t;
+    if (!kc_job_done) return;
+    /* Fast hosts finish sooner than the spinner can be seen; the poll keeps
+     * running, so wait out the rest of the minimum here. */
+    if (lv_tick_elaps(kc_job_start) < KC_MIN_SPINNER_MS) return;
+    kc_finish_job();
+    kc_update();
 }
 
 /* -- Dice roll entropy source ---------------------------------------- */
@@ -479,12 +1562,9 @@ static void on_dice_roll(uint8_t value) {
     dice_entropy_add_roll(dice, value);
 
     if (!dice_entropy_ready(dice)) {
-        char status[64];
-        int  res = snprintf(status, sizeof(status), "Entropy: %u / %u bits (%u rolls)",
-                           (unsigned)dice_entropy_bits(dice), (unsigned)dice_entropy_needed(dice),
-                           dice_entropy_rolls(dice));
-        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(status), "status string too long");
-        ui_dice_set_status(status);
+        ui_dice_set_progress(dice_entropy_bytes(dice), dice_entropy_rolls(dice),
+                             dice_entropy_bits(dice), dice_entropy_needed(dice),
+                             dice_entropy_last_roll(dice), dice_entropy_last_bits(dice));
         return;
     }
 
@@ -493,16 +1573,34 @@ static void on_dice_roll(uint8_t value) {
     uint8_t  entropy[32];
     size_t   elen = dice_entropy_derive(dice, entropy, sizeof(entropy));
     ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
     dice_entropy_discard(dice);
     dice = NULL;
 
     char desc[48];
-    int res = snprintf(desc, sizeof(desc), "d%u dice %u-word (%u rolls)", sides, word_count, rolls);
+    int  res = snprintf(desc, sizeof(desc), "d%u dice %u bits (%u rolls)", sides,
+                       utils_word_count_bits(word_count), rolls);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, "dice rolls");
+    secure_memzero(entropy, sizeof(entropy));
 }
+
+// (Re)build the dice screen from the live session, so returning from the help
+// screen keeps the rolls collected so far.
+static void show_dice_screen(void) {
+    ASSERT_OR_DIE(dice, "no active dice session");
+    unsigned sides = dice_entropy_sides(dice);
+    ui_show_dice(sides, utils_word_count_bits(word_count), on_dice_roll, on_dice_help,
+                 on_dice_cancel);
+    if (dice_entropy_rolls(dice) > 0) {
+        ui_dice_set_progress(dice_entropy_bytes(dice), dice_entropy_rolls(dice),
+                             dice_entropy_bits(dice), dice_entropy_needed(dice),
+                             dice_entropy_last_roll(dice), dice_entropy_last_bits(dice));
+    }
+}
+
+static void on_dice_help_close(void) { show_dice_screen(); }
+
+static void on_dice_help(void) { ui_show_roll_help(on_dice_help_close); }
 
 static void on_dice_cancel(void) {
     if (dice) {
@@ -516,7 +1614,7 @@ static void on_dice_cancel(void) {
 static void on_dice_sides_chosen(uint8_t sides) {
     ASSERT_OR_DIE(!dice, "dice session already active");
     dice = dice_entropy_begin(word_count, sides);
-    ui_show_dice(sides, on_dice_roll, on_dice_cancel);
+    show_dice_screen();
 }
 
 static void on_dice_sides_cancel(void) {
@@ -534,12 +1632,9 @@ static void on_coin_flip(uint8_t value) {
     coin_entropy_add_flip(coin, value);
 
     if (!coin_entropy_ready(coin)) {
-        char status[64];
-        int  res = snprintf(status, sizeof(status), "Entropy: %u / %u bits (%u flips)",
-                           (unsigned)coin_entropy_bits(coin), (unsigned)coin_entropy_needed(coin),
-                           coin_entropy_flips(coin));
-        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(status), "status string too long");
-        ui_coin_set_status(status);
+        ui_coin_set_progress(coin_entropy_bytes(coin), coin_entropy_flips(coin),
+                             coin_entropy_bits(coin), coin_entropy_needed(coin),
+                             coin_entropy_last_flip(coin), coin_entropy_last_bits(coin));
         return;
     }
 
@@ -547,15 +1642,15 @@ static void on_coin_flip(uint8_t value) {
     uint8_t  entropy[32];
     size_t   elen = coin_entropy_derive(coin, entropy, sizeof(entropy));
     ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
     coin_entropy_discard(coin);
     coin = NULL;
 
     char desc[48];
-    int  res = snprintf(desc, sizeof(desc), "coin flips %u-word (%u flips)", word_count, flips);
+    int  res = snprintf(desc, sizeof(desc), "coin flips %u bits (%u flips)",
+                       utils_word_count_bits(word_count), flips);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_GENERATED, desc, "coin flips");
+    secure_memzero(entropy, sizeof(entropy));
 }
 
 static void on_coin_cancel(void) {
@@ -567,49 +1662,95 @@ static void on_coin_cancel(void) {
                          go_source);
 }
 
+// Same as the dice screen: rebuild from the live session after a help trip.
+static void show_coin_screen(void) {
+    ASSERT_OR_DIE(coin, "no active coin session");
+    ui_show_coin(utils_word_count_bits(word_count), on_coin_flip, on_coin_help, on_coin_cancel);
+    if (coin_entropy_flips(coin) > 0) {
+        ui_coin_set_progress(coin_entropy_bytes(coin), coin_entropy_flips(coin),
+                             coin_entropy_bits(coin), coin_entropy_needed(coin),
+                             coin_entropy_last_flip(coin), coin_entropy_last_bits(coin));
+    }
+}
+
+static void on_coin_help_close(void) { show_coin_screen(); }
+
+static void on_coin_help(void) { ui_show_roll_help(on_coin_help_close); }
+
 static void on_coin_flips(void) {
     ASSERT_OR_DIE(!coin, "coin session already active");
     coin = coin_entropy_begin(word_count);
-    ui_show_coin(on_coin_flip, on_coin_cancel);
+    show_coin_screen();
 }
 
 /* -- Touch screen entropy source -------------------------------------- */
 static touch_entropy_t* touch = NULL;
+static uint8_t          touch_seed[32];
+static size_t           touch_seed_len = 0;
+
+// Rebuild the touch screen from the live session: after a help round trip, and
+// when the seed has already been derived it shows the finish view again.
+static void show_touch_screen(void) {
+    ASSERT_OR_DIE(touch, "no active touch session");
+    ui_show_touch_screen(on_touch_tap, on_touch_cancel, on_touch_help, on_touch_continue,
+                         touch_entropy_target_bits(touch));
+    if (touch_seed_len > 0) {
+        ui_touch_screen_show_seed(touch_seed, touch_seed_len);
+    } else if (touch_entropy_taps(touch) > 0) {
+        ui_touch_screen_set_progress(touch_entropy_bytes(touch), touch_entropy_bits(touch),
+                                     touch_entropy_target_bits(touch), touch_entropy_taps(touch),
+                                     touch_entropy_last_tile(touch));
+    }
+}
 
 static void on_touch_tap(lv_coord_t x, lv_coord_t y) {
     ASSERT_OR_DIE(touch, "no active touch session");
+    if (touch_seed_len > 0) return;
     touch_entropy_add_tap(touch, x, y);
 
     if (!touch_entropy_ready(touch)) {
-        char status[64];
-        int  res =
-            snprintf(status, sizeof(status), "Entropy: %u / %u bits",
-                     (unsigned)touch_entropy_bits(touch), (unsigned)touch_entropy_needed(touch));
-        ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(status), "status string too long");
-        ui_touch_screen_set_status(status);
+        ui_touch_screen_set_progress(touch_entropy_bytes(touch), touch_entropy_bits(touch),
+                                     touch_entropy_target_bits(touch), touch_entropy_taps(touch),
+                                     touch_entropy_last_tile(touch));
         return;
     }
 
-    unsigned taps = touch_entropy_taps(touch);
-    uint8_t  entropy[32];
-    size_t   elen = touch_entropy_derive(touch, entropy, sizeof(entropy));
-    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
-    mnemonic_t* m = mnemonic_from_entropy(entropy, elen);
-    secure_memzero(entropy, sizeof(entropy));
+    // Enough tapped bits: hash them, and show the seed beside them before moving
+    // on, so what the taps became is visible.
+    touch_seed_len = touch_entropy_derive(touch, touch_seed, sizeof(touch_seed));
+    ASSERT_OR_DIE(touch_seed_len == 16 || touch_seed_len == 32, "unexpected entropy length");
+    ui_touch_screen_show_seed(touch_seed, touch_seed_len);
+}
+
+static void on_touch_continue(void) {
+    ASSERT_OR_DIE(touch, "no active touch session");
+    ASSERT_OR_DIE(touch_seed_len == 16 || touch_seed_len == 32, "no touch seed to use");
+    const unsigned taps = touch_entropy_taps(touch);
+    const size_t   elen = touch_seed_len;
+
     touch_entropy_discard(touch);
-    touch = NULL;
+    touch          = NULL;
+    touch_seed_len = 0;
 
     char desc[48];
-    int  res = snprintf(desc, sizeof(desc), "touch screen %u-word (%u taps)", word_count, taps);
+    int  res = snprintf(desc, sizeof(desc), "touch screen %u bits (%u taps)",
+                       utils_word_count_bits(word_count), taps);
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(desc), "description string too long");
-    merge_or_reject(m, MNEMONIC_TYPE_GENERATED, desc);
+    merge_or_reject(touch_seed, elen, MNEMONIC_TYPE_GENERATED, desc, "touch taps");
+    secure_memzero(touch_seed, sizeof(touch_seed));
 }
+
+static void on_touch_help_close(void) { show_touch_screen(); }
+
+static void on_touch_help(void) { ui_show_touch_help(on_touch_help_close); }
 
 static void on_touch_cancel(void) {
     if (touch) {
         touch_entropy_discard(touch);
         touch = NULL;
     }
+    secure_memzero(touch_seed, sizeof(touch_seed));
+    touch_seed_len = 0;
     go_source();
 }
 
@@ -620,8 +1761,17 @@ static void on_touch_screen(void) {
     uint32_t      res_x = (uint32_t)lv_display_get_horizontal_resolution(disp);
     uint32_t      res_y = (uint32_t)lv_display_get_vertical_resolution(disp);
 
-    touch = touch_entropy_begin(word_count, res_x, res_y);
-    ui_show_touch_screen(on_touch_tap, on_touch_cancel);
+    touch          = touch_entropy_begin(word_count, res_x, res_y);
+    touch_seed_len = 0;
+    show_touch_screen();
+}
+
+// The entry screen asks for words to be typed, so what it explains is the words
+// read as bits, and coming back from it has to leave the typing where it was.
+static void on_we_help(void) { ui_show_words_to_bits_help(on_we_help_close); }
+
+static void on_we_help_close(void) {
+    if (we_handle) ui_word_entry_reshow(we_handle);
 }
 
 static void on_we_complete(void) {
@@ -647,28 +1797,43 @@ static void on_we_complete(void) {
         ui_show_mnemonic_error(on_we_error_cancel, on_we_error_retry, on_we_error_choose);
         return;
     }
-    int res = snprintf(pending_desc, sizeof(pending_desc), "entered %u-word", word_count);
+    int res = snprintf(pending_desc, sizeof(pending_desc), "entered %u bits",
+                       utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
 
-    // Show the completed mnemonic and ask the user to confirm before it is
-    // used
-    pending_new = m;
-    ui_show_mnemonic(mnemonic_words(m), MNEMONIC_TYPE_ENTERED, on_we_ok, NULL);
+    // The words were only a way to reach the entropy, which is what is kept.
+    uint8_t entropy[32];
+    size_t  elen = mnemonic_take_entropy(m, entropy);
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+    memcpy(pending_entropy, entropy, elen);
+    pending_entropy_len = elen;
+    secure_memzero(entropy, sizeof(entropy));
+
+    // Show the entered seed and ask the user to confirm before it is used.
+    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, "typed words",
+                        on_we_ok);
 }
 
 static void on_we_ok(void) {
-    ASSERT_OR_DIE(pending_new, "no pending mnemonic");
-    mnemonic_t* m = pending_new;
-    pending_new   = NULL;
+    ASSERT_OR_DIE(pending_entropy_len, "no pending entropy");
 
-    if (!current) {
-        // First source: the entered mnemonic was already shown for approval.
-        current = m;
+    uint8_t      entropy[32];
+    const size_t elen = pending_entropy_len;
+    memcpy(entropy, pending_entropy, elen);
+    pending_wipe();
+
+    if (!current_entropy_len) {
+        // First source: the entered seed was already shown for approval.
+        memcpy(current_entropy, entropy, elen);
+        current_entropy_len = elen;
+        secure_memzero(entropy, sizeof(entropy));
         ui_log_add("started with %s", pending_desc);
+        secure_memzero(pending_desc, sizeof(pending_desc));
         go_source();
         return;
     }
-    merge_or_reject(m, MNEMONIC_TYPE_ENTERED, pending_desc);
+    merge_or_reject(entropy, elen, MNEMONIC_TYPE_ENTERED, pending_desc, "typed words");
+    secure_memzero(entropy, sizeof(entropy));
 }
 
 static void on_we_error_cancel(void) { go_source(); }
@@ -692,8 +1857,8 @@ static void on_we_error_retry(void) {
         on_enter_manual(); // nothing entered yet; start from scratch
         return;
     }
-    we_handle =
-        ui_word_entry_resume(word_count, word_count - 1, prefix, on_we_complete, on_we_cancel);
+    we_handle = ui_word_entry_resume(word_count, word_count - 1, prefix, on_we_complete,
+                                     on_we_cancel, on_we_help);
 }
 
 static void on_we_error_back(void) {
@@ -731,39 +1896,55 @@ static void on_we_word_selected(const char* last_word) {
     if (!m) {
         FATAL("chosen last word failed validation");
     }
-    res = snprintf(pending_desc, sizeof(pending_desc), "entered %u-word (chosen last word)",
-                   word_count);
+    res = snprintf(pending_desc, sizeof(pending_desc), "entered %u bits (chosen last word)",
+                   utils_word_count_bits(word_count));
     ASSERT_OR_DIE(res > 0 && (size_t)res < sizeof(pending_desc), "description string too long");
-    pending_new = m;
-    ui_show_mnemonic(mnemonic_words(m), MNEMONIC_TYPE_ENTERED, on_we_ok, NULL);
+
+    uint8_t entropy[32];
+    size_t  elen = mnemonic_take_entropy(m, entropy);
+    ASSERT_OR_DIE(elen == 16 || elen == 32, "unexpected entropy length");
+    memcpy(pending_entropy, entropy, elen);
+    pending_entropy_len = elen;
+    secure_memzero(entropy, sizeof(entropy));
+
+    show_entropy_screen(pending_entropy, pending_entropy_len, MNEMONIC_TYPE_ENTERED, "typed words",
+                        on_we_ok);
 }
 
 // -- Re-enter source with correct title based on state -----------------
 static void go_source(void) {
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 static void go_back_source(void) {
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 /* -- Step: word count chosen ------------------------------------------ */
 static void on_12(void) {
     word_count = 12;
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 static void on_24(void) {
     word_count = 24;
     ui_show_source(on_generate, on_enter_manual, on_other_source, on_show_state, on_finish,
-                   current != NULL);
+                   current_entropy_len != 0);
 }
 
 /* -- State screen ----------------------------------------------------- */
 static void on_show_state(void) {
-    ui_show_state(go_back_source, current ? mnemonic_words(current) : NULL);
+    char        hex[2 * 32 + 1];
+    const char* p = NULL;
+    if (current_entropy_len) {
+        ASSERT_OR_DIE(bytes_to_hex(current_entropy, current_entropy_len, hex, sizeof(hex)),
+                      "entropy hex buffer too small");
+        p = hex;
+    }
+    ui_show_state(go_back_source, p);
+    secure_memzero(hex, sizeof(hex));
 }
 
 static void on_finish_done(void) {
@@ -772,25 +1953,522 @@ static void on_finish_done(void) {
         we_handle = NULL;
     }
     secure_memzero(we_entered, sizeof(we_entered));
-    mnemonic_discard(current);
-    current = NULL;
+    final_mnemonic_wipe();
+    /* The keys derived for these words go with them. A derivation still
+     * running is left to finish; its result is thrown away when it does. */
+    kc_live = false;
+    if (kc_timer) kc_discard = true;
+    kc_session_free();
+    secure_memzero(current_entropy, sizeof(current_entropy));
+    current_entropy_len = 0;
+    pending_wipe();
+    secure_memzero(pending_desc, sizeof(pending_desc));
+    bits_wipe();
     ui_go_main();
 }
 
 static void on_finish(void) {
-    if (!current) {
+    if (!current_entropy_len) {
         ui_go_main();
         return;
     }
-    ui_show_mnemonic(mnemonic_words(current), MNEMONIC_TYPE_FINAL, on_finish_done,
-                     on_export_seedqr);
+    show_final_screen();
     ui_log_add("finished");
 }
 
-/* -- Entry: "New Wallet" button --------------------------------------- */
-static void on_new_wallet(lv_event_t* e) {
+/* -- Multisig wallet builder ------------------------------------------ */
+/* Cosigners are entered one at a time - scanned as a SeedQR when a camera is
+ * available, otherwise typed - and each derivation runs on the background task
+ * with a spinner, because one BIP39 stretch takes seconds on a small MCU. The
+ * wallet screen is the hub: it shows what is known so far and asks for the next
+ * key. Nothing is stored: the wallet only lives in RAM while its screen is up. */
+enum { MS_MIN_KEYS = 2, MS_MAX_KEYS = 15 };
+/* Keep the spinner up long enough to be seen on a fast host. */
+#define MS_MIN_SPINNER_MS 1000
+
+static multisig_t*        ms_wallet;
+static size_t             ms_keys;      /* cosigners the wallet was started with */
+static size_t             ms_threshold; /* signatures needed to spend */
+static size_t             ms_slot;      /* cosigner being entered */
+static multisig_network_t ms_network = MULTISIG_MAINNET;
+static unsigned           ms_words; /* 12 or 24, for the typing screens */
+static char               ms_title[40];
+static const char*        ms_options[MS_MAX_KEYS];
+static char               ms_option_text[MS_MAX_KEYS][32];
+static char               ms_descriptor_text[MULTISIG_DESCRIPTOR_MAX];
+static char               ms_cosigner_text[MULTISIG_XPUB_MAX + 64];
+static char               ms_summary_text[48];
+static char               ms_progress_text[48];
+static char               ms_busy_text[48];
+static char               ms_address[MULTISIG_ADDR_MAX];
+static char               ms_change[MULTISIG_ADDR_MAX];
+static ui_multisig_row_t  ms_rows[MS_MAX_KEYS];
+static char               ms_row_value[MS_MAX_KEYS][MULTISIG_PATH_MAX + 32];
+
+/* The one derivation job. The worker owns the words until ms_finish_job(). */
+static char*                 ms_job_words;
+static size_t                ms_job_slot;
+static multisig_set_result_t ms_job_result;
+static size_t                ms_job_duplicate; /* slot with the same seed */
+static volatile bool         ms_job_done;
+static lv_timer_t*           ms_timer; /* polls the background job */
+static uint32_t              ms_job_start;
+static bool                  ms_leave_pending; /* Done tapped while a key was deriving */
+
+/* Multi-part UR export: the descriptor as a series of animatable parts. */
+enum { MS_UR_PARTS_MAX = 64, MS_UR_FRAGMENT = 80 };
+static char*  ms_ur_parts[MS_UR_PARTS_MAX];
+static size_t ms_ur_count;
+
+static char* ms_dup(const char* s) {
+    const size_t n    = strlen(s) + 1;
+    char*        copy = malloc(n);
+    if (copy) memcpy(copy, s, n);
+    return copy;
+}
+
+static void ms_words_free(char** words) {
+    if (!*words) return;
+    secure_memzero(*words, strlen(*words));
+    free(*words);
+    *words = NULL;
+}
+
+static void ms_ur_free(void) {
+    for (size_t i = 0; i < ms_ur_count; i++) {
+        free(ms_ur_parts[i]);
+        ms_ur_parts[i] = NULL;
+    }
+    ms_ur_count = 0;
+}
+
+static void ms_free(void) {
+    if (ms_timer) {
+        lv_timer_delete(ms_timer);
+        ms_timer = NULL;
+    }
+    ms_words_free(&ms_job_words);
+    ms_ur_free();
+    multisig_free(ms_wallet);
+    ms_wallet        = NULL;
+    ms_leave_pending = false;
+    ms_keys          = 0;
+    ms_threshold     = 0;
+    ms_slot          = 0;
+    secure_memzero(ms_descriptor_text, sizeof(ms_descriptor_text));
+    secure_memzero(ms_cosigner_text, sizeof(ms_cosigner_text));
+    secure_memzero(ms_address, sizeof(ms_address));
+    secure_memzero(ms_change, sizeof(ms_change));
+    secure_memzero(ms_row_value, sizeof(ms_row_value));
+}
+
+/* Cancel from anywhere in the builder: drop the keys and go back to the menu.
+ * The worker writes into the wallet, so a leave during a derivation waits for
+ * it to finish rather than freeing the wallet under it. */
+static void on_ms_leave(void) {
+    if (ms_timer) {
+        ms_leave_pending = true;
+        return;
+    }
+    ms_free();
+    ui_go_main();
+}
+
+/* -- Deriving one cosigner in the background --------------------------- */
+static void on_ms_add_cosigner(void);
+static void ms_job_failed(void);
+static void ms_refresh(void);
+static void ms_derive_worker(void* arg) {
+    (void)arg;
+    ms_job_result = multisig_set_words_ex(ms_wallet, ms_job_slot, ms_job_words, &ms_job_duplicate);
+    __sync_synchronize();
+    ms_job_done = true;
+}
+
+/* A refused cosigner asks for the words again rather than dropping the whole
+ * wallet. The usual cause is a seed phrase typed or scanned that is already one
+ * of the wallet's other cosigners. */
+static void ms_job_failed(void) {
+    static char message[80];
+
+    if (ms_job_result == MULTISIG_SET_DUPLICATE_KEY && ms_job_duplicate < ms_keys) {
+        snprintf(message, sizeof(message), "That seed phrase is already cosigner %u.",
+                 (unsigned)(ms_job_duplicate + 1));
+        ui_show_confirm("Key Already Used", message, "Enter again", "Cancel", on_ms_add_cosigner,
+                        on_ms_leave);
+        return;
+    }
+    ui_show_confirm("Invalid seed phrase", "Those words do not pass the BIP39 checksum.",
+                    "Enter again", "Cancel", on_ms_add_cosigner, on_ms_leave);
+}
+
+static void ms_finish_job(void) {
+    __sync_synchronize();
+    ms_job_done = false;
+    if (ms_timer) {
+        lv_timer_delete(ms_timer);
+        ms_timer = NULL;
+    }
+    ms_words_free(&ms_job_words);
+    if (ms_leave_pending) {
+        ms_leave_pending = false;
+        ms_free();
+        ui_go_main();
+        return;
+    }
+    if (ms_job_result != MULTISIG_SET_OK) {
+        ms_job_failed();
+        return;
+    }
+    ms_slot++;
+    ms_refresh();
+}
+
+static void ms_poll_cb(lv_timer_t* t) {
+    (void)t;
+    if (!ms_job_done) return;
+    /* Fast hosts finish sooner than the spinner can be seen. */
+    if (lv_tick_elaps(ms_job_start) < MS_MIN_SPINNER_MS) return;
+    ms_finish_job();
+}
+
+static void ms_start_derive(size_t slot, const char* words) {
+    ASSERT_OR_DIE(ms_wallet && words && words[0], "no cosigner words to derive");
+    ASSERT_OR_DIE(ms_timer == NULL, "a cosigner derivation is already running");
+
+    ms_words_free(&ms_job_words);
+    ms_job_words = ms_dup(words);
+    ASSERT_OR_DIE(ms_job_words, "out of memory");
+    ms_job_slot      = slot;
+    ms_job_result    = MULTISIG_SET_OK;
+    ms_job_duplicate = SIZE_MAX;
+    ms_job_done      = false;
+    ms_job_start     = lv_tick_get();
+    snprintf(ms_busy_text, sizeof(ms_busy_text), "Deriving cosigner %u of %u...",
+             (unsigned)(slot + 1), (unsigned)ms_keys);
+
+    if (hal_work_start(ms_derive_worker, NULL)) {
+        ms_timer = lv_timer_create(ms_poll_cb, 50, NULL);
+        ASSERT_OR_DIE(ms_timer, "could not create the derivation timer");
+        ms_refresh();
+        return;
+    }
+
+    /* No background task on this platform: paint the spinner, do the work here
+     * and leave the spinner up for its minimum time. */
+    ms_refresh();
+    lv_refr_now(NULL);
+    ms_derive_worker(NULL);
+    const uint32_t elapsed = lv_tick_elaps(ms_job_start);
+    if (elapsed < MS_MIN_SPINNER_MS) ui_delay_ms(MS_MIN_SPINNER_MS - elapsed);
+    ms_finish_job();
+}
+
+/* -- The wallet screen ------------------------------------------------- */
+static void on_ms_export_choice(void);
+static void on_ms_show_qr(void);
+static void on_ms_row_qr(uint8_t index);
+
+/* Build the view from the wallet's current state and show it. */
+static void ms_refresh(void) {
+    if (!ms_wallet) return;
+
+    const char* net   = ms_network == MULTISIG_TESTNET ? "testnet" : "mainnet";
+    size_t      ready = 0;
+    for (size_t i = 0; i < ms_keys; i++) {
+        if (multisig_slot_ready(ms_wallet, i)) {
+            snprintf(ms_row_value[i], sizeof(ms_row_value[i]), "Cosigner %u  %s  %s",
+                     (unsigned)(i + 1), multisig_slot_fingerprint(ms_wallet, i),
+                     multisig_slot_path(ms_wallet, i));
+            ms_rows[i].ready = true;
+            ready++;
+        } else {
+            snprintf(ms_row_value[i], sizeof(ms_row_value[i]), "Cosigner %u  not set yet",
+                     (unsigned)(i + 1));
+            ms_rows[i].ready = false;
+        }
+        ms_rows[i].label = NULL;
+        ms_rows[i].value = ms_row_value[i];
+    }
+
+    const bool complete = multisig_complete(ms_wallet);
+    snprintf(ms_summary_text, sizeof(ms_summary_text), "%u of %u  (%s)", (unsigned)ms_threshold,
+             (unsigned)ms_keys, net);
+    snprintf(ms_progress_text, sizeof(ms_progress_text), "keys entered: %u of %u", (unsigned)ready,
+             (unsigned)ms_keys);
+
+    ms_address[0]         = '\0';
+    ms_change[0]          = '\0';
+    ms_descriptor_text[0] = '\0';
+    if (complete) {
+        multisig_descriptor(ms_wallet, ms_descriptor_text, sizeof(ms_descriptor_text));
+        multisig_address(ms_wallet, 0, 0, ms_address, sizeof(ms_address));
+        multisig_address(ms_wallet, 1, 0, ms_change, sizeof(ms_change));
+    }
+    ui_multisig_view_t view;
+    memset(&view, 0, sizeof(view));
+    view.summary    = ms_summary_text;
+    view.progress   = complete ? NULL : ms_progress_text;
+    view.descriptor = complete ? ms_descriptor_text : NULL;
+    view.address    = complete ? ms_address : NULL;
+    view.change     = complete ? ms_change : NULL;
+    view.rows       = ms_rows;
+    view.row_count  = ms_keys;
+    view.busy       = ms_timer != NULL;
+    view.busy_text  = ms_busy_text;
+    view.primary    = complete ? "Export" : (view.busy ? "Deriving..." : "Add cosigner");
+
+    ui_show_multisig(&view, on_ms_row_qr, complete ? on_ms_export_choice : on_ms_add_cosigner,
+                     on_ms_leave);
+}
+
+/* Every row of the wallet screen can export itself: a cosigner's key, the
+ * descriptor, and the wallet's first receive and change addresses. */
+static void on_ms_row_qr(uint8_t index) {
+    if (!ms_wallet) return;
+
+    const char* title = "Cosigner Key";
+    const char* text  = ms_cosigner_text;
+    char        caption[64];
+    if (index < ms_keys) {
+        if (!multisig_slot_ready(ms_wallet, index)) return;
+        if (multisig_cosigner_key(ms_wallet, index, ms_cosigner_text, sizeof(ms_cosigner_text)) ==
+            0)
+            return;
+        snprintf(caption, sizeof(caption), "cosigner %u\n%s", (unsigned)(index + 1),
+                 multisig_slot_fingerprint(ms_wallet, index));
+    } else {
+        switch (index) {
+        case UI_MULTISIG_QR_DESCRIPTOR:
+            if (!ms_descriptor_text[0]) return;
+            title = "Descriptor";
+            text  = ms_descriptor_text;
+            snprintf(caption, sizeof(caption), "%u of %u\nwsh(sortedmulti)", (unsigned)ms_threshold,
+                     (unsigned)ms_keys);
+            break;
+        case UI_MULTISIG_QR_RECEIVE:
+            if (!ms_address[0]) return;
+            title = "Receive Address";
+            text  = ms_address;
+            snprintf(caption, sizeof(caption), "receive  m/0/0");
+            break;
+        case UI_MULTISIG_QR_CHANGE:
+            if (!ms_change[0]) return;
+            title = "Change Address";
+            text  = ms_change;
+            snprintf(caption, sizeof(caption), "change  m/1/0");
+            break;
+        default:
+            return;
+        }
+    }
+
+    if (!qr_encode((const uint8_t*)text, strlen(text), QR_MODE_BYTE, &exported_qr))
+        FATAL("multisig row QR encode failed");
+
+    export_return = ms_refresh;
+    ui_show_qr(title, exported_qr.cells, exported_qr.size, caption, NULL, on_export_done);
+}
+
+/* -- Entering one cosigner -------------------------------------------- */
+static void on_ms_add_cosigner(void) {
+    if (ms_timer) return; /* a derivation is running: ignore the tap */
+    ASSERT_OR_DIE(ms_wallet && ms_slot < ms_keys, "no cosigner slot to fill");
+    snprintf(ms_title, sizeof(ms_title), "Cosigner %u of %u", (unsigned)(ms_slot + 1),
+             (unsigned)ms_keys);
+
+    const char* options[3];
+    size_t      n = 0;
+    if (hal_camera_available()) options[n++] = "Scan SeedQR";
+    options[n++] = "Type 12 words";
+    options[n++] = "Type 24 words";
+
+    ui_show_choice(ms_title, "Enter this cosigner's seed phrase", options, n, on_ms_slot_source,
+                   ms_refresh);
+}
+
+static void on_ms_slot_source(uint8_t option) {
+    size_t i = 0;
+    if (hal_camera_available() && option == i++) {
+        on_ms_scan_start();
+        return;
+    }
+    ms_words  = (option == i) ? 12 : 24;
+    we_handle = ui_word_entry_begin(ms_words, on_ms_words_done, on_ms_words_cancel, NULL);
+}
+
+static void on_ms_words_cancel(void) {
+    ui_word_entry_discard(we_handle);
+    we_handle = NULL;
+    ms_refresh();
+}
+
+static void on_ms_words_done(void) {
+    const char* words = ui_word_entry_result(we_handle);
+    ASSERT_OR_DIE(words && words[0], "no words entered");
+    ms_start_derive(ms_slot, words);
+    ui_word_entry_discard(we_handle);
+    we_handle = NULL;
+}
+
+static void on_ms_scan_start(void) {
+    if (!hal_camera_available()) FATAL("Camera not available.");
+    camera = hal_camera_open();
+    ASSERT_OR_DIE(camera, "Failed to open camera.");
+    qr_scan_cb     = on_ms_seedqr_payload;
+    qr_scan_title  = ms_title;
+    qr_scan_cancel = on_ms_scan_cancel;
+    qr_scan_help   = NULL;
+    qr_scan_screen_show();
+    camera_timer = lv_timer_create(camera_feed_tick, 120, NULL);
+}
+
+static void on_ms_scan_cancel(void) {
+    camera_feed_stop();
+    ms_refresh();
+}
+
+/* A SeedQR of the next cosigner's seed phrase. */
+static bool on_ms_seedqr_payload(qr_source_t source, const uint8_t* payload, size_t plen) {
+    (void)source;
+    mnemonic_t* m = NULL;
+
+    if (plen == SEEDQR_STANDARD_12_DIGITS || plen == SEEDQR_STANDARD_24_DIGITS) {
+        char digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        memcpy(digits, payload, plen);
+        digits[plen] = '\0';
+        m            = seedqr_standard_decode(digits);
+        secure_memzero(digits, sizeof(digits));
+    } else if (plen == 16 || plen == 32) {
+        m = seedqr_compact_decode(payload, plen);
+    }
+    if (!m) return false; /* not a SeedQR: keep looking */
+
+    camera_feed_stop();
+    const char* words = mnemonic_words(m);
+    ASSERT_OR_DIE(words && words[0], "scanned mnemonic has no words");
+    ms_start_derive(ms_slot, words);
+    mnemonic_discard(m);
+    return true;
+}
+
+/* -- Starting a wallet ------------------------------------------------- */
+static void on_multisig(lv_event_t* e) {
     (void)e;
-    ASSERT_OR_DIE(!current, "current mnemonic should be NULL");
+    ms_free();
+
+    static const char* const keys[MS_MAX_KEYS - MS_MIN_KEYS + 1] = {
+        "2 keys", "3 keys",  "4 keys",  "5 keys",  "6 keys",  "7 keys",  "8 keys",
+        "9 keys", "10 keys", "11 keys", "12 keys", "13 keys", "14 keys", "15 keys"};
+    ui_show_choice_compact("Build Multisig", "How many keys does the wallet have?", keys,
+                           sizeof(keys) / sizeof(keys[0]), on_ms_keys, on_ms_leave);
+}
+
+static void on_ms_keys(uint8_t index) {
+    ms_keys = (size_t)index + MS_MIN_KEYS;
+
+    for (size_t i = 0; i < ms_keys; i++) {
+        snprintf(ms_option_text[i], sizeof(ms_option_text[i]), "%u of %u", (unsigned)(i + 1),
+                 (unsigned)ms_keys);
+        ms_options[i] = ms_option_text[i];
+    }
+    ui_show_choice_compact("Build Multisig", "How many signatures are needed to spend?", ms_options,
+                           ms_keys, on_ms_threshold, on_ms_counts_back);
+}
+
+static void on_ms_counts_back(void) { on_multisig(NULL); }
+
+static void on_ms_threshold_restart(void) { on_ms_keys((uint8_t)(ms_keys - MS_MIN_KEYS)); }
+
+static void on_ms_threshold(uint8_t index) {
+    ms_threshold = (size_t)index + 1;
+
+    static const char* const networks[] = {"Mainnet", "Testnet"};
+    ui_show_choice_compact("Build Multisig", "Which network is the wallet on?", networks, 2,
+                           on_ms_network, on_ms_threshold_restart);
+}
+
+static void on_ms_network(uint8_t index) {
+    const multisig_network_t network = index == 1 ? MULTISIG_TESTNET : MULTISIG_MAINNET;
+    ms_wallet                        = multisig_new(ms_keys, ms_threshold, network);
+    ASSERT_OR_DIE(ms_wallet, "could not start the multisig wallet");
+    ms_slot    = 0;
+    ms_network = network;
+    ms_refresh();
+}
+
+/* -- Export ----------------------------------------------------------- */
+static void on_ms_export_choice(void) {
+    static const char* const options[] = {"Single QR", "Animated QR (UR)"};
+    ui_show_choice("Export Descriptor",
+                   "A multisig descriptor is dense; the animated code is easier to scan.", options,
+                   sizeof(options) / sizeof(options[0]), on_ms_export_kind, ms_refresh);
+}
+
+/* BC-UR multi-part export: the descriptor map, cut into fountain parts that a
+ * receiving wallet collects over successive frames. */
+static void on_ms_export_anim(void) {
+    const size_t len =
+        multisig_descriptor(ms_wallet, ms_descriptor_text, sizeof(ms_descriptor_text));
+    if (len == 0) FATAL("multisig descriptor failed");
+
+    uint8_t* cbor     = NULL;
+    size_t   cbor_len = 0;
+    if (!ur_descriptor_encode(ms_descriptor_text, &cbor, &cbor_len))
+        FATAL("UR descriptor encode failed");
+
+    const size_t count = ur_multipart_count(cbor_len, MS_UR_FRAGMENT);
+    if (count == 0 || count > MS_UR_PARTS_MAX) {
+        free(cbor);
+        FATAL("multisig descriptor needs too many UR parts");
+    }
+
+    ms_ur_free();
+    for (size_t i = 0; i < count; i++) {
+        char* part = NULL;
+        if (!ur_multipart_encode_part("output-descriptor", cbor, cbor_len, MS_UR_FRAGMENT,
+                                      (uint32_t)(i + 1), &part)) {
+            free(cbor);
+            ms_ur_free();
+            FATAL("UR part encode failed");
+        }
+        ms_ur_parts[i] = part;
+        ms_ur_count    = i + 1;
+    }
+    free(cbor);
+
+    export_return = ms_refresh;
+    ui_show_qr_anim("Descriptor", (const char* const*)ms_ur_parts, ms_ur_count,
+                    "BC-UR\noutput-descriptor", NULL, on_export_done);
+}
+
+static void on_ms_export_kind(uint8_t index) {
+    if (index == 0) {
+        on_ms_show_qr();
+        return;
+    }
+    on_ms_export_anim();
+}
+
+static void on_ms_show_qr(void) {
+    const size_t len =
+        multisig_descriptor(ms_wallet, ms_descriptor_text, sizeof(ms_descriptor_text));
+    if (len == 0) FATAL("multisig descriptor failed");
+    if (!qr_encode((const uint8_t*)ms_descriptor_text, len, QR_MODE_BYTE, &exported_qr))
+        FATAL("multisig descriptor encode failed");
+
+    char caption[64];
+    snprintf(caption, sizeof(caption), "%u of %u\nwsh(sortedmulti)", (unsigned)ms_threshold,
+             (unsigned)ms_keys);
+
+    export_return = ms_refresh;
+    ui_show_qr("Descriptor", exported_qr.cells, exported_qr.size, caption, NULL, on_export_done);
+}
+
+/* -- Entry: "Create Mnemonic Seed" button --------------------------------------- */
+static void on_create_mnemonic(lv_event_t* e) {
+    (void)e;
+    ASSERT_OR_DIE(!current_entropy_len, "working seed should be empty");
     ASSERT_OR_DIE(!we_handle, "word entry handle should be NULL");
     ui_show_word_count(on_12, on_24);
 }
@@ -802,7 +2480,9 @@ static void on_test_error(lv_event_t* e) {
 }
 
 /* -- Initialization --------------------------------------------------- */
-static void show_main_screen(void) { ui_show_main(on_new_wallet, on_test_error); }
+static void show_main_screen(void) {
+    ui_show_main(on_create_mnemonic, on_inspect_tx, on_multisig, on_test_error);
+}
 
 void app_init(void) {
     lv_display_t* disp = lv_display_get_default();

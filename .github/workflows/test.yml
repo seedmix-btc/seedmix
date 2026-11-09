@@ -25,7 +25,8 @@ jobs:
             automake \
             libtool \
             libtool-bin \
-            libsdl2-dev
+            libsdl2-dev \
+            zlib1g-dev
 
       - name: Build and run unit tests
         run: bash scripts/test.sh
@@ -67,6 +68,7 @@ jobs:
             libtool \
             libtool-bin \
             libsdl2-dev \
+            zlib1g-dev \
             lcov
 
       - name: Build, test, and collect coverage
@@ -97,7 +99,8 @@ jobs:
             automake \
             libtool \
             libtool-bin \
-            libsdl2-dev
+            libsdl2-dev \
+            zlib1g-dev
 
       - name: Clone dependencies
         run: bash scripts/ensure_deps.sh
@@ -110,7 +113,7 @@ jobs:
             -DENABLE_SANITIZERS=address,undefined \
             -DLVGL_DIR="$PWD/external/lvgl"
           cmake --build build-asan --target seedmix_tests -- -j"$(nproc)"
-          ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
             ctest --test-dir build-asan --output-on-failure
 
   fuzz:
@@ -133,6 +136,7 @@ jobs:
             libtool \
             libtool-bin \
             libsdl2-dev \
+            zlib1g-dev \
             clang
 
       - name: Build libwally (fuzz targets link against it)

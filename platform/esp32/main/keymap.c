@@ -10,6 +10,9 @@
  *   button 0 alone       -> LV_KEY_LEFT  (previous focusable item)
  *   button 1 alone       -> LV_KEY_RIGHT (next focusable item)
  *   button 0 + button 1  -> LV_KEY_ENTER (confirm / activate)
+ *
+ * Which button maps to which direction is board configuration
+ * (SEEDMIX_BUTTONS_SWAP_LR).
  */
 
 #include "keymap.h"
@@ -71,6 +74,16 @@ static keymap_state_t s_state     = KEYMAP_STATE_IDLE;
 static lv_key_t       s_arm_key   = 0;
 static uint32_t       s_arm_since = 0;
 
+// Which logical key a lone button maps to. Buttons are wired the other way
+// round on some boards (CONFIG_SEEDMIX_BUTTONS_SWAP_LR).
+#if CONFIG_SEEDMIX_BUTTONS_SWAP_LR
+#define BTN0_KEY LV_KEY_RIGHT
+#define BTN1_KEY LV_KEY_LEFT
+#else
+#define BTN0_KEY LV_KEY_LEFT
+#define BTN1_KEY LV_KEY_RIGHT
+#endif
+
 /* Map the current button combination to a single logical key (0 = none). */
 static lv_key_t translate(void) {
     bool     b0  = debounced_pressed(0);
@@ -85,7 +98,7 @@ static lv_key_t translate(void) {
         }
         if (b0 || b1) {
             s_state     = KEYMAP_STATE_ARMING;
-            s_arm_key   = b0 ? LV_KEY_LEFT : LV_KEY_RIGHT;
+            s_arm_key   = b0 ? BTN0_KEY : BTN1_KEY;
             s_arm_since = now;
         }
         return 0;
@@ -100,7 +113,7 @@ static lv_key_t translate(void) {
             return 0;
         }
         {
-            lv_key_t key = b0 ? LV_KEY_LEFT : LV_KEY_RIGHT;
+            lv_key_t key = b0 ? BTN0_KEY : BTN1_KEY;
             if (key != s_arm_key) {
                 /* A different single button went down - re-arm. */
                 s_arm_key   = key;
@@ -123,7 +136,7 @@ static lv_key_t translate(void) {
             s_state = KEYMAP_STATE_IDLE;
             return 0;
         }
-        return (b0 ? LV_KEY_LEFT : LV_KEY_RIGHT);
+        return (b0 ? BTN0_KEY : BTN1_KEY);
 
     case KEYMAP_STATE_ENTER:
         /* Latch ENTER until all buttons are released so an early release of

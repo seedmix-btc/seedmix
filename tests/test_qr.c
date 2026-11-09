@@ -3,6 +3,8 @@
  * @brief Round-trip tests for main/qr/qr.c (libqrencode encode -> quirc decode).
  */
 
+#include "crypto/mnemonic.h"
+#include "crypto/seedqr.h"
 #include "qr/qr.h"
 #include "unity.h"
 
@@ -85,11 +87,12 @@ static void test_rejects_oversized_frame(void) {
     uint8_t payload[32] = {0};
     size_t  out_len     = 0;
 
-    TEST_ASSERT_FALSE(qr_decode(img, 513, 1, payload, sizeof(payload), &out_len));
+    /* QR_SIDE_MAX is 1024, so any side >= 1025 must be rejected. */
+    TEST_ASSERT_FALSE(qr_decode(img, 1025, 1, payload, sizeof(payload), &out_len));
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
-    TEST_ASSERT_FALSE(qr_decode(img, 1, 513, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_FALSE(qr_decode(img, 1, 1025, payload, sizeof(payload), &out_len));
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
-    TEST_ASSERT_FALSE(qr_decode(img, 513, 513, payload, sizeof(payload), &out_len));
+    TEST_ASSERT_FALSE(qr_decode(img, 1025, 1025, payload, sizeof(payload), &out_len));
     TEST_ASSERT_EQUAL_UINT(0, (unsigned)out_len);
 }
 
@@ -137,6 +140,58 @@ static void test_rejects_empty_payload(void) {
     free(g.cells);
 }
 
+/* Both SeedQR forms the final screen can export, end to end: mnemonic -> code
+ * -> QR -> decoded payload -> mnemonic.  Whichever one the user picks has to
+ * read back as the seed they were shown. */
+static void test_seedqr_forms_roundtrip(void) {
+    const uint8_t e[16] = {42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57};
+    mnemonic_t*   m     = mnemonic_from_entropy(e, sizeof(e));
+    TEST_ASSERT_NOT_NULL(m);
+
+    uint32_t  w = 0, h = 0;
+    uint8_t   payload[256];
+    size_t    out_len = 0;
+    qr_grid_t g       = {0};
+
+    /* Compact: the entropy bytes, in byte mode. */
+    uint8_t compact[32];
+    size_t  n = seedqr_compact_encode(m, compact, sizeof(compact));
+    TEST_ASSERT_EQUAL_UINT(16, (unsigned)n);
+    TEST_ASSERT_TRUE(qr_encode(compact, n, QR_MODE_BYTE, &g));
+
+    uint8_t* img = grid_to_gray(&g, 4, 4, &w, &h);
+    TEST_ASSERT_TRUE(qr_decode(img, w, h, payload, sizeof(payload), &out_len));
+    free(img);
+    qr_grid_free(&g);
+
+    mnemonic_t* back = seedqr_compact_decode(payload, out_len);
+    TEST_ASSERT_NOT_NULL(back);
+    TEST_ASSERT_EQUAL_STRING(mnemonic_words(m), mnemonic_words(back));
+    mnemonic_discard(back);
+
+    /* Standard: four digits a word, in numeric mode. */
+    char digits[SEEDQR_STANDARD_24_DIGITS + 1];
+    n = seedqr_standard_encode(m, digits, sizeof(digits));
+    TEST_ASSERT_EQUAL_UINT(SEEDQR_STANDARD_12_DIGITS, (unsigned)n);
+    TEST_ASSERT_TRUE(qr_encode((const uint8_t*)digits, n, QR_MODE_NUMERIC, &g));
+
+    img = grid_to_gray(&g, 4, 4, &w, &h);
+    TEST_ASSERT_TRUE(qr_decode(img, w, h, payload, sizeof(payload), &out_len));
+    free(img);
+    qr_grid_free(&g);
+    TEST_ASSERT_EQUAL_UINT((unsigned)n, (unsigned)out_len);
+    TEST_ASSERT_EQUAL_MEMORY(digits, payload, out_len);
+
+    char raw[SEEDQR_STANDARD_24_DIGITS + 1];
+    memcpy(raw, payload, out_len);
+    raw[out_len] = '\0';
+    back         = seedqr_standard_decode(raw);
+    TEST_ASSERT_NOT_NULL(back);
+    TEST_ASSERT_EQUAL_STRING(mnemonic_words(m), mnemonic_words(back));
+    mnemonic_discard(back);
+    mnemonic_discard(m);
+}
+
 static void test_encode_guards(void) {
     const uint8_t data[16] = {0};
     qr_grid_t     g        = {0};
@@ -146,6 +201,18 @@ static void test_encode_guards(void) {
     TEST_ASSERT_FALSE(qr_encode(data, 0, QR_MODE_BYTE, &g));
     // NULL output grid
     TEST_ASSERT_FALSE(qr_encode(data, sizeof(data), QR_MODE_BYTE, NULL));
+}
+
+static void test_encode_oversized(void) {
+    /* More than a version-40 byte-mode QR can hold: QRinput_append fails. */
+    uint8_t* data = (uint8_t*)malloc(4000);
+    TEST_ASSERT_NOT_NULL(data);
+    memset(data, 0xAA, 4000);
+
+    qr_grid_t g = {0};
+    TEST_ASSERT_FALSE(qr_encode(data, 4000, QR_MODE_BYTE, &g));
+
+    free(data);
 }
 
 static void test_decode_guards(void) {
@@ -183,15 +250,32 @@ static void test_decode_rejects_small_capacity(void) {
     qr_grid_free(&g);
 }
 
+/* Compact payloads from SeedSigner's published test vectors that contain the
+ * bytes QR readers commonly stop at or split on: a NUL (vector 2) and a CR LF
+ * pair (vector 9).  Both have to survive our own encode/decode untouched. */
+static void test_compact_problem_bytes_roundtrip(void) {
+    static const uint8_t v2[32] = {0x0e, 0x59, 0xdd, 0xe2, 0x76, 0x00, 0x93, 0x17, 0xf1, 0x27, 0x5f,
+                                   0x13, 0x89, 0x88, 0x80, 0x78, 0xc9, 0x93, 0x68, 0xd1, 0xe8, 0x24,
+                                   0x89, 0xb5, 0xf6, 0x29, 0x53, 0x1f, 0xc5, 0xb6, 0xa5, 0x6e};
+    roundtrip(v2, sizeof(v2), QR_MODE_BYTE, 25);
+
+    static const uint8_t v9[16] = {0xf5, 0x5c, 0xf5, 0x87, 0xf2, 0x54, 0x3d, 0x01,
+                                   0x09, 0x0d, 0x0a, 0xe7, 0x10, 0xbd, 0x3b, 0x6d};
+    roundtrip(v9, sizeof(v9), QR_MODE_BYTE, 21);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_compact_12);
     RUN_TEST(test_compact_24);
     RUN_TEST(test_standard_12);
     RUN_TEST(test_standard_24);
+    RUN_TEST(test_compact_problem_bytes_roundtrip);
+    RUN_TEST(test_seedqr_forms_roundtrip);
     RUN_TEST(test_rejects_oversized_frame);
     RUN_TEST(test_rejects_empty_payload);
     RUN_TEST(test_encode_guards);
+    RUN_TEST(test_encode_oversized);
     RUN_TEST(test_decode_guards);
     RUN_TEST(test_decode_rejects_small_capacity);
     return UNITY_END();

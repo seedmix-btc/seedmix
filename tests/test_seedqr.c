@@ -7,12 +7,67 @@
 #include "crypto/mnemonic.h"
 #include "crypto/seedqr.h"
 #include "unity.h"
+#include "util/utils.h"
+#include "vectors.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 void setUp(void) {}
 void tearDown(void) {}
+
+/* -- SeedSigner's published test vectors ------------------------------- */
+/* tests/vectors/seedqr/spec/seedsigner.txt is copied from SeedSigner's SeedQR
+ * specification by scripts/check_seedqr_vectors.py, which also verifies that
+ * the copy still matches upstream. Each vector is the same seed in all three
+ * forms, so both encoders and both decoders are checked against the reference
+ * rather than against each other. Several compact payloads deliberately
+ * contain 0x00, 0x0a, 0x0d or 0x0d 0x0a: the bytes QR readers commonly stop at
+ * or split on. */
+#define SEEDQR_SPEC_MAX_VECTORS 16
+
+typedef struct {
+    const char* seeds; // points into the file buffer
+    const char* standard;
+    uint8_t     compact[32];
+    size_t      compact_len;
+} seedqr_spec_vector_t;
+
+/* Read the vectors out of the spec file; *text_out owns the strings in @p out. */
+static size_t seedqr_spec_load(seedqr_spec_vector_t* out, size_t cap, uint8_t** text_out) {
+    uint8_t* text = vectors_read_file("seedqr/spec/seedsigner.txt", NULL);
+    if (!text) return 0;
+    *text_out = text;
+
+    size_t count   = 0;
+    char*  saveptr = NULL;
+    for (char* line = strtok_r((char*)text, "\n", &saveptr); line;
+         line       = strtok_r(NULL, "\n", &saveptr)) {
+        vectors_trim(line);
+        if (line[0] == '\0' || line[0] == '#') continue;
+        if (count >= cap) break;
+
+        if (strncmp(line, "seeds: ", 7) == 0) {
+            memset(&out[count], 0, sizeof(out[count]));
+            out[count].seeds = line + 7;
+        } else if (strncmp(line, "standard: ", 10) == 0) {
+            out[count].standard = line + 10;
+        } else if (strncmp(line, "compact: ", 9) == 0) {
+            if (!hex_to_bytes(line + 9, strlen(line + 9), out[count].compact,
+                              sizeof(out[count].compact))) {
+                continue;
+            }
+            out[count].compact_len = strlen(line + 9) / 2;
+            if (out[count].seeds && out[count].standard && out[count].compact_len >= 16 &&
+                out[count].compact_len <= 32) {
+                count++;
+            }
+        }
+    }
+    return count;
+}
 
 static void test_compact_roundtrip_12(void) {
     const uint8_t e[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
@@ -103,26 +158,108 @@ static void test_standard_zeros_12(void) {
     mnemonic_discard(m);
 }
 
-static void test_vector4_spec(void) {
-    // SeedSigner docs/seed_qr/README.md, Test Vector 4 (12 words)
-    const uint8_t e[16] = {0x5b, 0xbd, 0x9d, 0x71, 0xa8, 0xec, 0x79, 0x90,
-                           0x83, 0x1a, 0xff, 0x35, 0x9d, 0x42, 0x65, 0x45};
-    mnemonic_t*   m     = mnemonic_from_entropy(e, sizeof(e));
-    TEST_ASSERT_NOT_NULL(m);
-    TEST_ASSERT_EQUAL_STRING(
-        "forum undo fragile fade shy sign arrest garment culture tube off merit",
-        mnemonic_words(m));
+/* Encode each published vector and read both forms back. */
+static void test_seedsigner_spec_vectors(void) {
+    seedqr_spec_vector_t vectors[SEEDQR_SPEC_MAX_VECTORS];
+    uint8_t*             text = NULL;
+    const size_t         n    = seedqr_spec_load(vectors, SEEDQR_SPEC_MAX_VECTORS, &text);
 
-    char digits[SEEDQR_STANDARD_12_DIGITS + 1];
-    TEST_ASSERT_EQUAL_UINT(SEEDQR_STANDARD_12_DIGITS,
-                           (unsigned)seedqr_standard_encode(m, digits, sizeof(digits)));
-    TEST_ASSERT_EQUAL_STRING("073318950739065415961602009907670428187212261116", digits);
+    TEST_ASSERT_TRUE_MESSAGE(n >= 9, "the specification's test vectors are all present");
 
-    uint8_t out[16];
-    TEST_ASSERT_EQUAL_UINT(16, (unsigned)seedqr_compact_encode(m, out, sizeof(out)));
-    TEST_ASSERT_EQUAL_MEMORY(e, out, sizeof(e));
+    for (size_t i = 0; i < n; i++) {
+        const seedqr_spec_vector_t* v = &vectors[i];
+        char                        msg[32];
+        snprintf(msg, sizeof(msg), "SeedSigner vector %u", (unsigned)i + 1);
 
-    mnemonic_discard(m);
+        mnemonic_t* m = mnemonic_from_string(v->seeds);
+        TEST_ASSERT_NOT_NULL_MESSAGE(m, msg);
+
+        char   digits[SEEDQR_STANDARD_24_DIGITS + 1];
+        size_t len = seedqr_standard_encode(m, digits, sizeof(digits));
+        TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)strlen(v->standard), (unsigned)len, msg);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(v->standard, digits, msg);
+
+        uint8_t compact[32];
+        len = seedqr_compact_encode(m, compact, sizeof(compact));
+        TEST_ASSERT_EQUAL_UINT_MESSAGE((unsigned)v->compact_len, (unsigned)len, msg);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(v->compact, compact, v->compact_len, msg);
+        mnemonic_discard(m);
+
+        mnemonic_t* from_std = seedqr_standard_decode(v->standard);
+        TEST_ASSERT_NOT_NULL_MESSAGE(from_std, msg);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(v->seeds, mnemonic_words(from_std), msg);
+        mnemonic_discard(from_std);
+
+        mnemonic_t* from_compact = seedqr_compact_decode(v->compact, v->compact_len);
+        TEST_ASSERT_NOT_NULL_MESSAGE(from_compact, msg);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(v->seeds, mnemonic_words(from_compact), msg);
+        mnemonic_discard(from_compact);
+    }
+
+    free(text);
+}
+
+/* -- Generated SeedQR vectors (tests/vectors/seedqr/) ------------------- */
+static void test_seedqr_vector_files(void) {
+    char** slugs   = NULL;
+    size_t n_slugs = 0;
+    TEST_ASSERT_TRUE(vectors_list_slugs("seedqr/raw", ".compact.bin", &slugs, &n_slugs));
+    TEST_ASSERT_TRUE(n_slugs > 0);
+
+    for (size_t s = 0; s < n_slugs; s++) {
+        const char* slug = slugs[s];
+        char        path[256];
+
+        snprintf(path, sizeof(path), "seedqr/raw/%s.compact.bin", slug);
+        size_t   ent_len = 0;
+        uint8_t* entropy = vectors_read_file(path, &ent_len);
+        TEST_ASSERT_NOT_NULL(entropy);
+        TEST_ASSERT_TRUE(ent_len == 16 || ent_len == 32);
+
+        snprintf(path, sizeof(path), "seedqr/raw/%s.standard.txt", slug);
+        char* digits = (char*)vectors_read_file(path, NULL);
+        TEST_ASSERT_NOT_NULL(digits);
+        vectors_trim(digits);
+
+        snprintf(path, sizeof(path), "seedqr/raw/%s.mnemonic.txt", slug);
+        char* words = (char*)vectors_read_file(path, NULL);
+        TEST_ASSERT_NOT_NULL(words);
+        vectors_trim(words);
+
+        /* entropy -> mnemonic must match the reference words */
+        mnemonic_t* m = mnemonic_from_entropy(entropy, ent_len);
+        TEST_ASSERT_NOT_NULL(m);
+        TEST_ASSERT_EQUAL_STRING(words, mnemonic_words(m));
+
+        /* CompactSeedQR roundtrip */
+        uint8_t compact[32];
+        size_t  clen = seedqr_compact_encode(m, compact, sizeof(compact));
+        TEST_ASSERT_EQUAL_UINT(ent_len, (unsigned)clen);
+        TEST_ASSERT_EQUAL_MEMORY(entropy, compact, ent_len);
+
+        mnemonic_t* dc = seedqr_compact_decode(entropy, ent_len);
+        TEST_ASSERT_NOT_NULL(dc);
+        TEST_ASSERT_EQUAL_STRING(words, mnemonic_words(dc));
+        mnemonic_discard(dc);
+
+        /* Standard SeedQR roundtrip */
+        char   enc[SEEDQR_STANDARD_24_DIGITS + 1];
+        size_t elen = seedqr_standard_encode(m, enc, sizeof(enc));
+        TEST_ASSERT_EQUAL_UINT(strlen(digits), (unsigned)elen);
+        TEST_ASSERT_EQUAL_STRING(digits, enc);
+
+        mnemonic_t* ds = seedqr_standard_decode(digits);
+        TEST_ASSERT_NOT_NULL(ds);
+        TEST_ASSERT_EQUAL_STRING(words, mnemonic_words(ds));
+        mnemonic_discard(ds);
+
+        mnemonic_discard(m);
+        free(words);
+        free(digits);
+        free(entropy);
+    }
+
+    vectors_free_slugs(slugs, n_slugs);
 }
 
 /* -- Error / boundary paths -------------------------------------------- */
@@ -166,11 +303,29 @@ static void test_standard_decode_rejects_non_digit(void) {
     char s[SEEDQR_STANDARD_12_DIGITS + 1];
     memset(s, '0', SEEDQR_STANDARD_12_DIGITS);
     s[SEEDQR_STANDARD_12_DIGITS] = '\0';
-    s[0]                         = 'a'; // strtoul consumes nothing -> rejected
+    s[0]                         = 'a'; // not a digit -> rejected
     TEST_ASSERT_NULL(seedqr_standard_decode(s));
 
     memset(s, '0', SEEDQR_STANDARD_12_DIGITS);
     s[4] = '-';
+    TEST_ASSERT_NULL(seedqr_standard_decode(s));
+}
+
+/* A payload that is not four digits per word must be rejected by the parser itself. */
+static void test_standard_decode_rejects_space_and_sign(void) {
+    char s[SEEDQR_STANDARD_12_DIGITS + 1];
+    memset(s, '0', SEEDQR_STANDARD_12_DIGITS);
+    memcpy(s + SEEDQR_STANDARD_12_DIGITS - 4, "0003", 4); // ... abandon, about
+    s[SEEDQR_STANDARD_12_DIGITS] = '\0';
+
+    mnemonic_t* ok = seedqr_standard_decode(s);
+    TEST_ASSERT_NOT_NULL(ok); // the unmodified digits are a valid SeedQR
+    mnemonic_discard(ok);
+
+    s[0] = ' '; // leading space is invalid
+    TEST_ASSERT_NULL(seedqr_standard_decode(s));
+
+    s[0] = '+'; // leading plus sign is invalid
     TEST_ASSERT_NULL(seedqr_standard_decode(s));
 }
 
@@ -215,11 +370,13 @@ int main(void) {
     RUN_TEST(test_standard_roundtrip_12);
     RUN_TEST(test_standard_roundtrip_24);
     RUN_TEST(test_standard_zeros_12);
-    RUN_TEST(test_vector4_spec);
+    RUN_TEST(test_seedsigner_spec_vectors);
+    RUN_TEST(test_seedqr_vector_files);
     RUN_TEST(test_compact_decode_invalid_len);
     RUN_TEST(test_compact_encode_short_buffer);
     RUN_TEST(test_standard_decode_null_and_bad_length);
     RUN_TEST(test_standard_decode_rejects_non_digit);
+    RUN_TEST(test_standard_decode_rejects_space_and_sign);
     RUN_TEST(test_standard_decode_rejects_bad_index);
     RUN_TEST(test_standard_decode_rejects_bad_checksum);
     RUN_TEST(test_standard_encode_error_paths);

@@ -1,9 +1,6 @@
 /**
  * @file lv_conf.h
- * @brief LVGL configuration - shared between Linux and ESP32 builds.
- *
- * This file is generic.  Platform-specific overrides (e.g. color depth,
- * memory size) go in lv_conf_<platform>.h and are included conditionally.
+ * @brief LVGL configuration for the Linux (SDL2) and Web (Emscripten) builds.
  */
 
 #ifndef LV_CONF_H
@@ -18,32 +15,17 @@ extern "C" {
  *----------------------------------------------------------------------*/
 #define LV_COLOR_DEPTH          16
 #define LV_COLOR_16_SWAP        0
-#define LV_COLOR_SCREEN_TRANSP  0
 
 /*----------------------------------------------------------------------
  * Memory
  *----------------------------------------------------------------------*/
 #define LV_MEM_SIZE             (128U * 1024U)   /* 128 kB */
 #define LV_MEM_ADR              0
-#define LV_MEM_BUF_MAX_NUM      16
-#define LV_MEMCPY_MEMSET_STD    1
 
 /*----------------------------------------------------------------------
- * HAL
+ * Display
  *----------------------------------------------------------------------*/
-
-/*----------------------------------------------------------------------
- * Display buffer
- *----------------------------------------------------------------------*/
-#define LV_HOR_RES_MAX          (480)
-#define LV_VER_RES_MAX          (320)
 #define LV_DPI                  130
-
-/*----------------------------------------------------------------------
- * GPU
- *----------------------------------------------------------------------*/
-#define LV_USE_GPU              0
-#define LV_GPU_DMA2D_FLUSH      0
 
 /*----------------------------------------------------------------------
  * SDL (Linux desktop driver)
@@ -71,24 +53,28 @@ extern "C" {
 #define LV_FONT_MONTSERRAT_28   1
 #define LV_FONT_MONTSERRAT_48   1
 #define LV_USE_FONT_COMPRESSED  1
-#define LV_USE_FONT_SUBPX       1
+
+/*----------------------------------------------------------------------
+ * Image decoders
+ *----------------------------------------------------------------------*/
+/* The Linux HAL decodes the image file the user picked with LVGL's bundled
+ * JPEG and BMP decoders, which also need the POSIX file system driver to open
+ * it by path. */
+#if !defined(__EMSCRIPTEN__)
+    #define LV_USE_TJPGD        1   /* JPEG */
+    #define LV_USE_BMP          1   /* BMP */
+
+    #define LV_USE_FS_POSIX     1
+    #if LV_USE_FS_POSIX
+        #define LV_FS_POSIX_LETTER      'A' /* paths are passed as "A:/path/to/image.png" */
+        #define LV_FS_POSIX_PATH        ""
+        #define LV_FS_POSIX_CACHE_SIZE  0
+    #endif
+#endif
 
 /*----------------------------------------------------------------------
  * Features - enable what you need
  *----------------------------------------------------------------------*/
-#define LV_USE_ANIMATION        1
-#define LV_USE_SHADOW           0
-#define LV_USE_OUTLINE          0
-#define LV_USE_PATTERN          0
-#define LV_USE_VALUE_STR        0
-#define LV_USE_BLEND_MODES      0
-#define LV_USE_OPA_SCALE        0
-#define LV_USE_IMG_TRANSFORM    0
-
-#define LV_USE_GROUP            1
-#define LV_USE_GPU_DRAW         0
-#define LV_USE_SKELETON         0
-
 #define LV_USE_SYSMON           0
 #define LV_USE_PERF_MONITOR     0
 
@@ -101,12 +87,12 @@ extern "C" {
  *----------------------------------------------------------------------*/
 #define LV_USE_ARC              1
 #define LV_USE_BAR              1
-#define LV_USE_BTN              1
-#define LV_USE_BTNMATRIX        1
+#define LV_USE_BUTTON           1
+#define LV_USE_BUTTONMATRIX     1
 #define LV_USE_CANVAS           0
 #define LV_USE_CHECKBOX         0
 #define LV_USE_DROPDOWN         0
-#define LV_USE_IMG              1
+#define LV_USE_IMAGE            1
 #define LV_USE_LABEL            1
 #define LV_USE_LINE             1
 #define LV_USE_ROLLER           0
@@ -121,19 +107,14 @@ extern "C" {
 #define LV_USE_SPINNER          1
 #define LV_USE_CALENDAR         0
 #define LV_USE_CHART            0
-#define LV_USE_COLORWHEEL       0
-#define LV_USE_IMGBTN           0
+#define LV_USE_IMAGEBUTTON      0
 #define LV_USE_KEYBOARD         1
 #define LV_USE_LED              0
 #define LV_USE_LIST             0
 #define LV_USE_MENU             0
-#define LV_USE_METER            0
 #define LV_USE_MSGBOX           1
 #define LV_USE_SPAN             0
 #define LV_USE_SPINBOX          0
-#define LV_USE_TABVIEW          0
-#define LV_USE_TILEVIEW         0
-#define LV_USE_WIN              0
 
 /*----------------------------------------------------------------------
  * Themes

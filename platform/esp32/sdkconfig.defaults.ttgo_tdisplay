@@ -1,0 +1,52 @@
+# seedmix board overlay - TTGO T-Display (classic ESP32).
+#
+# Combine with the shared `sdkconfig.defaults` (base first, this file second):
+#
+#     ./scripts/build_esp32.sh
+#     # or
+#     SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.ttgo_tdisplay" \
+#         idf.py set-target esp32
+#
+# Board: 240x135 landscape ST7789 SPI display (Jade's TTGO T-Display settings),
+# no touchscreen, two physical buttons (GPIO 0 top / GPIO 35 bottom), no
+# camera, no I2C peripherals, hardware RNG.
+
+# -- Target / flash -----------------------------------------------------
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# -- LVGL (panel-specific) ---------------------------------------------
+CONFIG_LV_MEM_SIZE_KILOBYTES=64
+
+# -- seedmix: display ---------------------------------------------------
+CONFIG_SEEDMIX_DISPLAY_RESOLUTION_240_135=y
+CONFIG_SEEDMIX_DISPLAY_DRIVER_ST7789=y
+CONFIG_SEEDMIX_DISPLAY_SPI_HOST=2
+CONFIG_SEEDMIX_DISPLAY_SPI_FREQ_HZ=20000000
+CONFIG_SEEDMIX_DISPLAY_SPI_CLK_GPIO=18
+CONFIG_SEEDMIX_DISPLAY_SPI_MOSI_GPIO=19
+CONFIG_SEEDMIX_DISPLAY_SPI_CS_GPIO=5
+CONFIG_SEEDMIX_DISPLAY_SPI_DC_GPIO=16
+CONFIG_SEEDMIX_DISPLAY_RST_GPIO=23
+CONFIG_SEEDMIX_DISPLAY_BACKLIGHT_GPIO=4
+CONFIG_SEEDMIX_DISPLAY_OFFSET_X=40
+CONFIG_SEEDMIX_DISPLAY_OFFSET_Y=53
+CONFIG_SEEDMIX_DISPLAY_INVERT_COLORS=y
+CONFIG_SEEDMIX_DISPLAY_SWAP_XY=y
+CONFIG_SEEDMIX_DISPLAY_MIRROR_X=y
+CONFIG_SEEDMIX_DISPLAY_MIRROR_Y=n
+
+# -- seedmix: touchscreen / camera --------------------------------------
+# The T-Display has neither.
+CONFIG_SEEDMIX_TOUCHSCREEN_ENABLE=n
+CONFIG_SEEDMIX_CAMERA_ENABLE=n
+
+# -- seedmix: physical buttons -----------------------------------------
+CONFIG_SEEDMIX_BUTTONS_ENABLE=y
+CONFIG_SEEDMIX_BUTTONS_COUNT=2
+CONFIG_SEEDMIX_BUTTON_0_GPIO=0
+CONFIG_SEEDMIX_BUTTON_1_GPIO=35
+CONFIG_SEEDMIX_BUTTON_2_GPIO=-1
+CONFIG_SEEDMIX_BUTTON_3_GPIO=-1
+CONFIG_SEEDMIX_BUTTONS_ACTIVE_LOW=y
+CONFIG_SEEDMIX_BUTTONS_DEBOUNCE_MS=30

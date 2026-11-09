@@ -19,6 +19,8 @@ menu "seedmix Hardware"
                 bool "240 x 240"
             config SEEDMIX_DISPLAY_RESOLUTION_240_320
                 bool "240 x 320"
+            config SEEDMIX_DISPLAY_RESOLUTION_480_320
+                bool "480 x 320 (Waveshare ESP32-S3-Touch-LCD-3.5 landscape)"
             config SEEDMIX_DISPLAY_RESOLUTION_CUSTOM
                 bool "Custom"
         endchoice
@@ -30,6 +32,7 @@ menu "seedmix Hardware"
             default 135 if SEEDMIX_DISPLAY_RESOLUTION_135_240
             default 240 if SEEDMIX_DISPLAY_RESOLUTION_240_240
             default 240 if SEEDMIX_DISPLAY_RESOLUTION_240_320
+            default 480 if SEEDMIX_DISPLAY_RESOLUTION_480_320
 
         config SEEDMIX_DISPLAY_HEIGHT
             int
@@ -37,6 +40,7 @@ menu "seedmix Hardware"
             default 240 if SEEDMIX_DISPLAY_RESOLUTION_135_240
             default 240 if SEEDMIX_DISPLAY_RESOLUTION_240_240
             default 320 if SEEDMIX_DISPLAY_RESOLUTION_240_320
+            default 320 if SEEDMIX_DISPLAY_RESOLUTION_480_320
 
         config SEEDMIX_DISPLAY_WIDTH_CUSTOM
             int "Custom display width (px)"
@@ -54,7 +58,9 @@ menu "seedmix Hardware"
             prompt "Display controller"
             default SEEDMIX_DISPLAY_DRIVER_ST7789
             config SEEDMIX_DISPLAY_DRIVER_ST7789
-                bool "ST7789 (SPI)"
+                bool "ST7789 (SPI, in-tree esp_lcd driver)"
+            config SEEDMIX_DISPLAY_DRIVER_ST7796
+                bool "ST7796 (SPI, espressif/esp_lcd_st7796)"
             config SEEDMIX_DISPLAY_DRIVER_ILI9341
                 bool "ILI9341 (SPI, needs espressif/esp_lcd_ili9341)"
             config SEEDMIX_DISPLAY_DRIVER_ST7735
@@ -63,10 +69,36 @@ menu "seedmix Hardware"
                 bool "None (headless)"
         endchoice
 
+        config SEEDMIX_DISPLAY_BGR
+            bool "Panel expects BGR colour order (instead of RGB)"
+            default n
+            help
+                Affects the MADCTL RGB/BGR bit. ST7789 boards are RGB;
+                the ST7796 on the Waveshare board is wired BGR.
+
+        config SEEDMIX_DISPLAY_SWAP_BYTES
+            bool "Byte-swap RGB565 pixel data before sending"
+            default SEEDMIX_DISPLAY_DRIVER_ST7796
+            help
+                LVGL renders RGB565 little-endian. Panels without a hardware
+                byte-order command need the two bytes of every pixel swapped
+                in software, otherwise colours are wrong (red/blue swapped)
+                and anti-aliased edges show colour fringing. The ST7789 has
+                such a command (RAMCTL, driven by data_endian); the ST7796
+                does not, so it needs this.
+
         config SEEDMIX_DISPLAY_SPI_HOST
             int "Display SPI peripheral (1=SPI2, 2=SPI3)"
             default 2
             range 1 2
+
+        config SEEDMIX_DISPLAY_SPI_FREQ_HZ
+            int "Display SPI clock frequency (Hz)"
+            default 20000000
+            range 1000000 80000000
+            help
+                The ST7796 on the Waveshare board runs at 80 MHz; the TTGO
+                T-Display ST7789 is driven at 20 MHz.
 
         config SEEDMIX_DISPLAY_SPI_CLK_GPIO
             int "Display SPI clock (SCLK) GPIO"
@@ -98,6 +130,27 @@ menu "seedmix Hardware"
             default 4
             range -1 48
 
+        config SEEDMIX_DISPLAY_BACKLIGHT_PWM
+            bool "Backlight is PWM dimmable (LEDC)"
+            default n
+            depends on SEEDMIX_DISPLAY_BACKLIGHT_GPIO >= 0
+            help
+                Drives the backlight with a LEDC PWM channel instead of a
+                plain on/off GPIO, so the brightness can be set. Used by the
+                Waveshare board (backlight on a dedicated pin).
+
+        config SEEDMIX_DISPLAY_BACKLIGHT_DUTY_PCT
+            int "Backlight brightness (%)"
+            default 80
+            range 1 100
+            depends on SEEDMIX_DISPLAY_BACKLIGHT_PWM
+
+        config SEEDMIX_DISPLAY_BACKLIGHT_FREQ_HZ
+            int "Backlight PWM frequency (Hz)"
+            default 5000
+            range 100 40000
+            depends on SEEDMIX_DISPLAY_BACKLIGHT_PWM
+
         config SEEDMIX_DISPLAY_OFFSET_X
             int "Panel window X offset (px)"
             default 0
@@ -128,27 +181,105 @@ menu "seedmix Hardware"
     endmenu
 
     # ------------------------------------------------------------------
+    menu "I2C bus"
+
+        config SEEDMIX_I2C_ENABLE
+            bool "Enable shared I2C bus"
+            default n
+            help
+                The I2C bus is shared by the capacitive touchscreen, the
+                TCA9554 IO expander (panel reset / power button), the camera
+                SCCB interface and any onboard IMU/RTC/PMIC. Enable it when
+                any of those are in use.
+
+        config SEEDMIX_I2C_PORT
+            int "I2C peripheral (0 = I2C0, 1 = I2C1)"
+            default 0
+            range 0 1
+            depends on SEEDMIX_I2C_ENABLE
+
+        config SEEDMIX_I2C_SDA_GPIO
+            int "I2C SDA GPIO"
+            default 8
+            range -1 48
+            depends on SEEDMIX_I2C_ENABLE
+
+        config SEEDMIX_I2C_SCL_GPIO
+            int "I2C SCL GPIO"
+            default 7
+            range -1 48
+            depends on SEEDMIX_I2C_ENABLE
+
+        config SEEDMIX_I2C_FREQ_HZ
+            int "I2C clock frequency (Hz)"
+            default 400000
+            range 10000 1000000
+            depends on SEEDMIX_I2C_ENABLE
+    endmenu
+
+    # ------------------------------------------------------------------
+    menu "IO expander"
+
+        config SEEDMIX_IO_EXPANDER_ENABLE
+            bool "Enable TCA9554 I2C IO expander"
+            default n
+            depends on SEEDMIX_I2C_ENABLE
+            help
+                Boards such as the Waveshare ESP32-S3-Touch-LCD-3.5(-C) drive
+                the panel reset (and the PWR button) through a TCA9554 8-bit
+                IO expander instead of dedicated ESP32 GPIOs
+
+        config SEEDMIX_IO_EXPANDER_I2C_ADDR
+            hex "TCA9554 I2C address"
+            default 0x20
+            depends on SEEDMIX_IO_EXPANDER_ENABLE
+
+        config SEEDMIX_IO_EXPANDER_LCD_RESET_PIN
+            int "Expander pin wired to the LCD reset (-1 = none)"
+            default 1
+            range -1 7
+            depends on SEEDMIX_IO_EXPANDER_ENABLE
+            help
+                Set to -1 when the panel reset is driven by
+                SEEDMIX_DISPLAY_RST_GPIO (or not needed at all).
+    endmenu
+
+    # ------------------------------------------------------------------
     menu "Touchscreen"
 
         config SEEDMIX_TOUCHSCREEN_ENABLE
             bool "Enable touchscreen"
             default n
+            help
+                Brings up the capacitive controller on the shared I2C bus
+                (see the "I2C bus" menu) and registers it as an LVGL pointer
+                input device.
 
         choice SEEDMIX_TOUCHSCREEN_DRIVER
             prompt "Touchscreen controller"
-            default SEEDMIX_TOUCHSCREEN_DRIVER_XPT2046
+            default SEEDMIX_TOUCHSCREEN_DRIVER_FT5X06
             depends on SEEDMIX_TOUCHSCREEN_ENABLE
-            config SEEDMIX_TOUCHSCREEN_DRIVER_XPT2046
-                bool "XPT2046 (SPI, resistive)"
             config SEEDMIX_TOUCHSCREEN_DRIVER_FT5X06
-                bool "FT5x06 / GT911 (I2C, capacitive)"
+                bool "FT5x06 family (I2C, capacitive)"
+                help
+                    FT5x06 / FT6236 / FT6336 capacitive controllers, via
+                    espressif/esp_lcd_touch_ft5x06. The Waveshare
+                    ESP32-S3-Touch-LCD-3.5(-C) uses an FT6336, which is
+                    register compatible and also answers at 0x38.
+            config SEEDMIX_TOUCHSCREEN_DRIVER_XPT2046
+                bool "XPT2046 (SPI, resistive) - not implemented yet"
         endchoice
 
-        config SEEDMIX_TOUCHSCREEN_SPI_CS_GPIO
-            int "Touch SPI chip-select (CS) GPIO"
+        config SEEDMIX_TOUCHSCREEN_I2C_ADDR
+            hex "Touch controller I2C address"
+            default 0x38
+            depends on SEEDMIX_TOUCHSCREEN_DRIVER_FT5X06
+
+        config SEEDMIX_TOUCHSCREEN_RST_GPIO
+            int "Touch reset (RST) GPIO (-1 = not wired)"
             default -1
             range -1 48
-            depends on SEEDMIX_TOUCHSCREEN_DRIVER_XPT2046
+            depends on SEEDMIX_TOUCHSCREEN_ENABLE
 
         config SEEDMIX_TOUCHSCREEN_IRQ_GPIO
             int "Touch interrupt (IRQ) GPIO (-1 = poll)"
@@ -156,37 +287,52 @@ menu "seedmix Hardware"
             range -1 48
             depends on SEEDMIX_TOUCHSCREEN_ENABLE
 
-        config SEEDMIX_TOUCHSCREEN_I2C_SDA_GPIO
-            int "Touch I2C SDA GPIO"
-            default 21
+        config SEEDMIX_TOUCHSCREEN_SPI_CS_GPIO
+            int "Touch SPI chip-select (CS) GPIO"
+            default -1
             range -1 48
-            depends on SEEDMIX_TOUCHSCREEN_DRIVER_FT5X06
-
-        config SEEDMIX_TOUCHSCREEN_I2C_SCL_GPIO
-            int "Touch I2C SCL GPIO"
-            default 22
-            range -1 48
-            depends on SEEDMIX_TOUCHSCREEN_DRIVER_FT5X06
-
-        config SEEDMIX_TOUCHSCREEN_I2C_ADDR
-            hex "Touch I2C address"
-            default 0x38
-            depends on SEEDMIX_TOUCHSCREEN_DRIVER_FT5X06
+            depends on SEEDMIX_TOUCHSCREEN_DRIVER_XPT2046
 
         config SEEDMIX_TOUCHSCREEN_SWAP_XY
             bool "Swap touch X and Y"
             default n
             depends on SEEDMIX_TOUCHSCREEN_ENABLE
+            help
+                Must agree with the panel rotation configured under
+                "Display" (SEEDMIX_DISPLAY_SWAP_XY).
 
         config SEEDMIX_TOUCHSCREEN_INVERT_X
-            bool "Invert touch X axis"
+            bool "Mirror (invert) touch X axis"
             default n
             depends on SEEDMIX_TOUCHSCREEN_ENABLE
 
         config SEEDMIX_TOUCHSCREEN_INVERT_Y
-            bool "Invert touch Y axis"
+            bool "Mirror (invert) touch Y axis"
             default n
             depends on SEEDMIX_TOUCHSCREEN_ENABLE
+
+        config SEEDMIX_TOUCHSCREEN_POLL_MS
+            int "Touch poll interval (ms)"
+            default 33
+            range 5 100
+            depends on SEEDMIX_TOUCHSCREEN_ENABLE
+            help
+                How often the controller is read. LVGL's own default is 33 ms
+                (LV_DEF_REFR_PERIOD), but capacitive controllers report much
+                faster than that
+
+        config SEEDMIX_TOUCHSCREEN_THRESHOLD
+            int "Touch detection threshold (0 = driver default)"
+            default 0
+            range 0 255
+            depends on SEEDMIX_TOUCHSCREEN_ENABLE
+            help
+                Value written to the controller's G_THGROUP register, which
+                sets how much capacitance change is needed before a touch is
+                recognised. Lower = more sensitive (lighter taps register),
+                at the risk of ghost touches
+
+                0 leaves the driver's own value alone
     endmenu
 
     # ------------------------------------------------------------------
@@ -208,7 +354,60 @@ menu "seedmix Hardware"
                 bool "OV2640 (2MP)"
             config SEEDMIX_CAMERA_MODEL_OV7670
                 bool "OV7670 (VGA)"
+            config SEEDMIX_CAMERA_MODEL_OV5640
+                bool "OV5640 (5MP, Waveshare ESP32-S3-Touch-LCD-3.5-C)"
         endchoice
+
+        choice SEEDMIX_CAMERA_FRAMESIZE
+            prompt "Initial camera capture size"
+            default SEEDMIX_CAMERA_FRAMESIZE_VGA
+            depends on SEEDMIX_CAMERA_ENABLE
+            help
+                Size the camera starts at. These are the pixels the QR decoder
+                is handed, so a larger frame means more pixels per QR module
+                and a better chance of reading small or dense codes; the cost
+                is PSRAM (RGB565 needs 2 bytes per pixel) and decode time.
+                The camera screens can switch between the two while streaming,
+                so this only picks the starting point.
+
+            config SEEDMIX_CAMERA_FRAMESIZE_QVGA
+                bool "QVGA 320x240 (fastest)"
+            config SEEDMIX_CAMERA_FRAMESIZE_VGA
+                bool "VGA 640x480 (4x QVGA)"
+        endchoice
+
+        choice SEEDMIX_CAMERA_ROTATION
+            prompt "Camera image rotation"
+            default SEEDMIX_CAMERA_ROTATION_0
+            depends on SEEDMIX_CAMERA_ENABLE
+            help
+                Rotation applied to every frame before the application sees
+                it
+
+            config SEEDMIX_CAMERA_ROTATION_0
+                bool "0 degrees (sensor orientation)"
+            config SEEDMIX_CAMERA_ROTATION_90
+                bool "90 degrees clockwise"
+            config SEEDMIX_CAMERA_ROTATION_180
+                bool "180 degrees"
+            config SEEDMIX_CAMERA_ROTATION_270
+                bool "270 degrees clockwise (= 90 counter-clockwise)"
+        endchoice
+
+        config SEEDMIX_CAMERA_HMIRROR
+            bool "Mirror horizontally"
+            default n
+            depends on SEEDMIX_CAMERA_ENABLE
+            help
+                Mirrors the image left-to-right as it is displayed
+
+        config SEEDMIX_CAMERA_VFLIP
+            bool "Flip vertically"
+            default n
+            depends on SEEDMIX_CAMERA_ENABLE
+            help
+                Flips the image top-to-bottom as it is displayed, after the
+                rotation
 
         config SEEDMIX_CAMERA_PIN_XCLK
             int "Camera XCLK GPIO"
@@ -246,9 +445,65 @@ menu "seedmix Hardware"
             range -1 48
             depends on SEEDMIX_CAMERA_ENABLE
 
-        config SEEDMIX_CAMERA_PIN_DATA_BASE
-            int "Camera D0 GPIO (D1..D7 are consecutive)"
+        config SEEDMIX_CAMERA_XCLK_HZ
+            int "Camera XCLK frequency (Hz)"
+            default 20000000
+            depends on SEEDMIX_CAMERA_ENABLE
+            help
+                Master clock generated for the sensor. 20 MHz is the driver's
+                well-tested default; the OV5640 on the Waveshare board is run
+                at 24 MHz by Waveshare's own demo.
+
+        config SEEDMIX_CAMERA_PIN_DATA0
+            int "Camera D0 GPIO (-1 = none)"
             default 4
+            range -1 48
+            depends on SEEDMIX_CAMERA_ENABLE
+            help
+                The eight data lines each get their own GPIO because they are
+                not always consecutive: the Waveshare board wires Y2..Y9 to
+                45, 47, 48, 46, 42, 40, 39 and 21, which a single base GPIO
+                cannot describe. D0 is the least significant bit (Y2).
+
+        config SEEDMIX_CAMERA_PIN_DATA1
+            int "Camera D1 GPIO (-1 = none)"
+            default 5
+            range -1 48
+            depends on SEEDMIX_CAMERA_ENABLE
+
+        config SEEDMIX_CAMERA_PIN_DATA2
+            int "Camera D2 GPIO (-1 = none)"
+            default 6
+            range -1 48
+            depends on SEEDMIX_CAMERA_ENABLE
+
+        config SEEDMIX_CAMERA_PIN_DATA3
+            int "Camera D3 GPIO (-1 = none)"
+            default 7
+            range -1 48
+            depends on SEEDMIX_CAMERA_ENABLE
+
+        config SEEDMIX_CAMERA_PIN_DATA4
+            int "Camera D4 GPIO (-1 = none)"
+            default 8
+            range -1 48
+            depends on SEEDMIX_CAMERA_ENABLE
+
+        config SEEDMIX_CAMERA_PIN_DATA5
+            int "Camera D5 GPIO (-1 = none)"
+            default 9
+            range -1 48
+            depends on SEEDMIX_CAMERA_ENABLE
+
+        config SEEDMIX_CAMERA_PIN_DATA6
+            int "Camera D6 GPIO (-1 = none)"
+            default 10
+            range -1 48
+            depends on SEEDMIX_CAMERA_ENABLE
+
+        config SEEDMIX_CAMERA_PIN_DATA7
+            int "Camera D7 GPIO (-1 = none)"
+            default 11
             range -1 48
             depends on SEEDMIX_CAMERA_ENABLE
     endmenu
@@ -304,6 +559,27 @@ menu "seedmix Hardware"
             default 30
             range 5 200
             depends on SEEDMIX_BUTTONS_ENABLE
+
+        config SEEDMIX_BUTTONS_SWAP_LR
+            bool "Button 0 = next, button 1 = previous"
+            default n
+            depends on SEEDMIX_BUTTONS_ENABLE
+            help
+                Swaps which physical button walks backwards and which walks
+                forwards, for boards whose buttons are the other way round.
+                Off: button 0 = previous, button 1 = next.
+
+        config SEEDMIX_BUTTONS_EXPANDER_PIN
+            int "Button 1 on IO expander pin (-1 = GPIO)"
+            default -1
+            range -1 7
+            depends on SEEDMIX_BUTTONS_ENABLE
+            help
+                Some boards wire a button to the IO expander rather than a
+                GPIO - the Waveshare PWR button is EXIO6. Set that pin here
+                and leave CONFIG_SEEDMIX_BUTTON_1_GPIO at -1. The expander
+                button reads active-high, so CONFIG_SEEDMIX_BUTTONS_ACTIVE_LOW
+                does not apply to it.
 
         config SEEDMIX_BUTTONS_COMBO_MS
             int "Two-button combo window (ms)"

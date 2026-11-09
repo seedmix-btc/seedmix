@@ -25,8 +25,9 @@
 /* Define to 1 if you have the <mbedtls/sha256.h> header file. */
 /* #undef HAVE_MBEDTLS_SHA256_H */
 
-/* Define to 1 if you have the <mbedtls/sha512.h> header file. */
-/* #undef HAVE_MBEDTLS_SHA512_H */
+/* Define to 1 if you have the <mbedtls/sha512.h> header file.
+ * Speed up SHA-512 */
+#define HAVE_MBEDTLS_SHA512_H 1
 
 /* Define to 1 if you have the `memset_s' function. */
 /* #undef HAVE_MEMSET_S */

@@ -36,6 +36,7 @@ endif()
 set(COMMON_SOURCES
     main/main.c
     main/ui/ui.c
+    main/ui/bitvis.c
     main/assets/splash_480x320_img.c
     main/assets/splash_240x135_img.c
     main/assets/logo_img.c
@@ -45,10 +46,18 @@ set(COMMON_SOURCES
     main/crypto/mnemonic.c
     main/crypto/touch.c
     main/crypto/dice.c
+    main/crypto/keycheck.c
+    main/crypto/multisig.c
     main/crypto/coin.c
     main/crypto/secure_stack.c
     main/crypto/bip39_wordlist.c
     main/crypto/seedqr.c
+    main/crypto/txinspect.c
+    main/crypto/descriptor.c
+    main/crypto/ur_descriptor.c
+    main/crypto/ur_psbt.c
+    main/crypto/ur.c
+    main/crypto/fountain.c
     main/qr/qr.c
     main/util/error.c
     main/util/log.c
@@ -61,6 +70,11 @@ if(PLATFORM STREQUAL "web")
 else()
     include(${CMAKE_SOURCE_DIR}/platform/linux/linux.cmake)
 endif()
+
+# Stamp the executable with the commit it came from (both platforms create the
+# same ${PROJECT_NAME} target above).
+include(BuildInfo)
+seedmix_build_info(${PROJECT_NAME})
 
 # -- Tests -------------------------------------------------------------------
 if(BUILD_TESTS)

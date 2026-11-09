@@ -1,0 +1,42 @@
+# Component registry dependencies
+#
+#   esp_lcd_st7796          - display controller of the Waveshare
+#                             ESP32-S3-Touch-LCD-3.5(-C) (3.5" 320x480 IPS)
+#   esp_lcd_touch           - touch framework (esp_lcd_touch_*)
+#   esp_lcd_touch_ft5x06    - FT5x06 family controller driver; the FT6336 used
+#                             by the Waveshare board is register compatible and
+#                             shares the 0x38 I2C address
+#   esp_io_expander         - IO expander framework (esp_io_expander_*)
+#   esp_io_expander_tca9554 - TCA9554 driver; the Waveshare board resets the
+#                             panel through one of its outputs, because the
+#                             ST7796 RST pin is not wired to a GPIO
+#   esp32-camera            - official camera driver for the OV5640 on the
+#                             Waveshare -C variant
+
+dependencies:
+  idf: ">=5.5"
+
+  espressif/esp_lcd_st7796:
+    version: "^1.4.0"
+    rules: &esp32s3_only
+      - if: "target in [esp32s3]"
+
+  espressif/esp_lcd_touch:
+    version: "^1.2.1"
+    rules: *esp32s3_only
+
+  espressif/esp_lcd_touch_ft5x06:
+    version: "^1.1.1"
+    rules: *esp32s3_only
+
+  espressif/esp_io_expander:
+    version: "^1.2.0"
+    rules: *esp32s3_only
+
+  espressif/esp_io_expander_tca9554:
+    version: "^2.0.3"
+    rules: *esp32s3_only
+
+  espressif/esp32-camera:
+    version: "^2.1.8"
+    rules: *esp32s3_only

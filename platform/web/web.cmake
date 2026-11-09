@@ -18,17 +18,21 @@ if(NOT EXISTS ${LVGL_DIR}/lvgl.h)
         "Run:  scripts/ensure_deps.sh")
 endif()
 
-set(LV_CONF_PATH ${CMAKE_SOURCE_DIR}/main/lv_conf.h)
+if(NOT LV_BUILD_CONF_PATH)
+    set(LV_BUILD_CONF_PATH "${CMAKE_SOURCE_DIR}/main/lv_conf.h" CACHE PATH
+        "lv_conf.h used by the vendored LVGL" FORCE)
+endif()
 
-set(LV_CONF_BUILD_DISABLE_EXAMPLES ON CACHE BOOL "" FORCE)
-set(LV_CONF_BUILD_DISABLE_DEMOS    ON CACHE BOOL "" FORCE)
+set(CONFIG_LV_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(CONFIG_LV_BUILD_DEMOS    OFF CACHE BOOL "" FORCE)
 
 # SDL2 headers come from Emscripten's bundled SDL2 port, so -sUSE_SDL=2 must
 # be on BOTH the compile line (LVGL's SDL driver includes <SDL2/SDL.h>) and
 # the link line.  These flags are directory-scoped, so set them before
 # add_subdirectory(lvgl) so the driver sources compile too.
-add_compile_options(-sUSE_SDL=2)
-add_link_options(-sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576 -sASYNCIFY -sEXIT_RUNTIME=0)
+add_compile_options(-sUSE_SDL=2 -pthread)
+add_link_options(-sUSE_SDL=2 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576 -sASYNCIFY -sEXIT_RUNTIME=0
+    -pthread -sPTHREAD_POOL_SIZE=2)
 
 add_subdirectory(${LVGL_DIR} ${CMAKE_BINARY_DIR}/lvgl)
 

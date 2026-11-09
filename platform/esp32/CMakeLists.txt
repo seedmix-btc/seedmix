@@ -21,4 +21,8 @@ endif()
 list(APPEND EXTRA_COMPONENT_DIRS "${LVGL_DIR}")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+# Keep one dependency lock per target
+idf_build_set_property(DEPENDENCIES_LOCK dependencies.lock.${IDF_TARGET})
+
 project(seedmix)

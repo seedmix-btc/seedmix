@@ -44,6 +44,15 @@ uint32_t coin_entropy_needed(const coin_entropy_t* c);
 /** Number of flips collected so far. */
 unsigned coin_entropy_flips(const coin_entropy_t* c);
 
+/** Raw entropy bits collected so far (see dice_entropy_bytes()). */
+const uint8_t* coin_entropy_bytes(const coin_entropy_t* c);
+
+/** Value of the most recent flip (1 = heads, 2 = tails). */
+unsigned coin_entropy_last_flip(const coin_entropy_t* c);
+
+/** Bits the most recent flip contributed. */
+uint32_t coin_entropy_last_bits(const coin_entropy_t* c);
+
 /**
  * @brief Derive the mnemonic entropy from the collected flips.
  *

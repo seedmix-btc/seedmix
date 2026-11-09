@@ -28,6 +28,12 @@ uint32_t coin_entropy_needed(const coin_entropy_t* c) { return dice_entropy_need
 
 unsigned coin_entropy_flips(const coin_entropy_t* c) { return dice_entropy_rolls(c); }
 
+const uint8_t* coin_entropy_bytes(const coin_entropy_t* c) { return dice_entropy_bytes(c); }
+
+unsigned coin_entropy_last_flip(const coin_entropy_t* c) { return dice_entropy_last_roll(c); }
+
+uint32_t coin_entropy_last_bits(const coin_entropy_t* c) { return dice_entropy_last_bits(c); }
+
 size_t coin_entropy_derive(coin_entropy_t* c, uint8_t* out, size_t out_len) {
     return dice_entropy_derive(c, out, out_len);
 }
