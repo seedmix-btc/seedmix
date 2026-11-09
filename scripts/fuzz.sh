@@ -32,8 +32,11 @@ fi
 
 FUZZ_TIME="${FUZZ_TIME:-30}"
 
+# -pthread rather than -lpthread: the driver flag also sets up the include
+# paths and defines, and it links on glibc 2.34+ where libpthread has been
+# folded into libc and no libpthread.so is installed.
 FLAGS=(
-    -g -O1
+    -g -O1 -pthread
     -fsanitize=fuzzer,address,undefined
     -I"${PROJECT_ROOT}/main"
     -I"${PROJECT_ROOT}/main/crypto"
@@ -64,7 +67,7 @@ run_fuzzer() {
     shift
     local corpus="${BUILD_DIR}/fuzz_corpus_${name#fuzz_}"
     echo "Building fuzzer: ${name}"
-    clang "${FLAGS[@]}" "$@" "${LIBWALLY_LIBS[@]}" "${EXTRA_LIBS[@]}" -lm -lpthread -o "${BUILD_DIR}/${name}"
+    clang "${FLAGS[@]}" "$@" "${LIBWALLY_LIBS[@]}" "${EXTRA_LIBS[@]}" -lm -o "${BUILD_DIR}/${name}"
 
     echo "Running ${name} for ${FUZZ_TIME}s…"
     local args=(-max_total_time="${FUZZ_TIME}" -detect_leaks=0 -print_final_stats=1)
@@ -115,6 +118,8 @@ run_fuzzer fuzz_ur \
     "${PROJECT_ROOT}/main/crypto/ur_psbt.c" \
     "${PROJECT_ROOT}/main/crypto/ur.c" \
     "${PROJECT_ROOT}/main/crypto/fountain.c" \
+    "${PROJECT_ROOT}/main/util/utils.c" \
+    "${PROJECT_ROOT}/fuzz/stubs.c" \
     "${PROJECT_ROOT}/fuzz/fuzz_ur.c"
 
 run_fuzzer fuzz_ur_descriptor \
